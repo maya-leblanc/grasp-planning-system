@@ -51,7 +51,10 @@ The script produces a detailed Power Grasp Analysis Report and visual diagnostic
 - A visual model where potential grasp zones are highlighed in bold red against a gray skeletal mesh
 
 ## Visuals
-![Pipeline](pictures/fig1.png)
+![Ex.Fig1](pictures/fig1.png)
+![Ex.Fig2](pictures/fig1.png)
+![Ex.Fig3](pictures/fig1.png)
+![Ex.Fig4](pictures/fig1.png)
 
 ## Full Code Access
 The full implementation is maintained in a private repository.
