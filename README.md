@@ -1,4 +1,4 @@
-# grasp-planning-system
+# ContourGrip
 
 Power Grasp Detection on 3D Objects via Multi-Height Mesh Analysis
 
