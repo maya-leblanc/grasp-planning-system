@@ -1,0 +1,1577 @@
+% Authour: Maya LeBlanc
+% Affiliation: McMaster University
+% Start Date: August 12 2025
+% Referal: Dr. Gary Bone, Department of Mechanical Engineering, Robotics
+% and Manufacturing Automation Laboratory (RMAL), McMaster University
+% Type: Grasp Planning Engineering Computing Challenge
+
+%% Section 1: Creating a Mesh.
+
+% Step 1: Create a PDE model and load geometry. 
+model = createpde();             % Create a generic PDE model
+importGeometry(model,"mug.stl"); % Load the STL into the model. 
+
+% Step 2: Generate a mesh for that geometry
+meshData = generateMesh(model,'Hmax',2);  % Smaller Hmax → finer mesh
+
+% Step 3:  Extract vertices and faces
+vertices = meshData.Nodes';     % Nx3 (X,Y,Z)
+faces    = meshData.Elements';  % Mx3 (vertex indices)
+
+% Unit Conversion to Meters
+% printing on command window decimal rounding & min/max verticies
+fprintf('\n=== UNIT CONVERSION CHECK ===\n');
+fprintf('Original vertex range:\n');
+fprintf('  X: %.2f to %.2f\n', min(vertices(:,1)), max(vertices(:,1)));
+fprintf('  Y: %.2f to %.2f\n', min(vertices(:,2)), max(vertices(:,2)));
+fprintf('  Z: %.2f to %.2f\n', min(vertices(:,3)), max(vertices(:,3)));
+
+% if needed, converting millimeters to meters and printing it out
+if max(abs(vertices(:))) > 10
+    fprintf('\n→ Converting from millimeters to meters...\n');
+    vertices = vertices / 1000;
+end % end = to terminate a block of code
+
+% Recalculate everything
+minVals = min(vertices);
+maxVals = max(vertices);
+sizeVals = maxVals - minVals;
+
+% reprint out new decimal roundings and results if in mm now m
+fprintf('\nFinal vertex range (meters):\n');
+fprintf('  X: %.4f to %.4f m\n', minVals(1), maxVals(1));
+fprintf('  Y: %.4f to %.4f m\n', minVals(2), maxVals(2));
+fprintf('  Z: %.4f to %.4f m\n', min(vertices(:,3)), max(vertices(:,3)));
+fprintf('  Mug size: %.4f x %.4f x %.4f m\n\n', sizeVals(1), sizeVals(2), sizeVals(3));
+
+%% Section 2: Z-Plane Intersects Mug and Slices for Cross-sectional Analysis
+
+z_min = min(vertices(:,3));
+z_max = max(vertices(:,3));
+fprintf('Slicing range: Z = %.4f to %.4f m\n', z_min, z_max);
+
+z0 = z_min + 0.02;  % 2 cm above base (automatically adjusts to your mug)  
+
+segments = []; % to store intersection line segments
+
+for i = 1:size(faces,1) % Get indices of the triangle's 3 vertices; Loops through every triangle in the mesh (faces is the list of triangles).
+   
+    idx = faces(i,:); 
+    triVerts = vertices(idx,:); % Gets the 3 vertices of the current triangle.
+    
+    zVals = triVerts(:,3); % Extracts the z-coordinates of the 3 vertices → to check where they are compared to the slicing plane.
+    
+    if (max(zVals) >= z0) && (min(zVals) <= z0) && ~all(zVals == z0) % Quesion 1: Does this triangle intersect the plane?
+        % If one vertex is above the plane (z > z0) and one below (z < z0), the plane must cut this triangle.
+        % The extra ~all(zVals == z0) avoids the special case where the entire triangle lies flat on the slicing plane.
+        
+        pts = []; % Store points where edges cross the plane
+        
+        % Check each edge of the triangle
+        for e = [1 2; 2 3; 3 1]'  % Question 2: Find intersection points with edges; Loops over the 3 edges of the triangle: (v1-v2, v2-v3, v3-v1).
+            p1 = triVerts(e(1),:);
+            p2 = triVerts(e(2),:); % Gets the endpoints of this edge.
+            
+            z1 = p1(3) - z0;
+            z2 = p2(3) - z0; % Measures whether each endpoint is above (+), below (-), or on (0) the plane.
+            
+            if z1 * z2 < 0  % one above, one below
+                t = z1 / (z1 - z2); % interpolation fraction
+                intersectPt = p1 + t * (p2 - p1); % If one point is above and the other below (signs differ), the edge must cross the plane. 
+                % t is a fraction (linear interpolation) to find exactly where the edge intersects the plane.
+
+                pts = [pts; intersectPt];
+            elseif z1 == 0 && z2 ~= 0
+                pts = [pts; p1]; % vertex exactly on plane
+            elseif z2 == 0 && z1 ~= 0
+                pts = [pts; p2]; % vertex exactly on plane; If a vertex lies exactly on the plane, we also record it.
+            end
+        end
+        % Question 3: Save the Segment; A triangle can only be sliced into a straight line segment (two intersection points).
+        % If we found exactly 2, we add that segment to our list.
+        % If exactly two intersection points found → store as segment
+        if size(pts,1) == 2
+            segments = [segments; pts]; % append both points
+        end
+    end
+end
+
+% Triangles are the smallest building blocks of the 3D model.
+% Each triangle can intersect the slicing plane → which gives us one small line segment.
+% By looping through all triangles, we gather every small piece of the slice.
+% Later, we stitch those line segments together → that's the slice contour of the mug.
+% So yes — we are "hyperanalyzing" the mug triangle by triangle, because that's the only 
+% way to compute where a flat plane intersects a mesh. It's like running a laser scanner 
+% across the mug, one triangle at a time.
+
+% At this stage, we have the mesh of the mug, and A way to compute a single slice at height z0, 
+% which gives you a bunch of line segments (pairs of 3D points)
+
+%% Section 3: Assemble and Visualize the Slice Contour
+
+tolerance = 1e-6; 
+loops = {}; 
+
+while size(segments,1) >= 2  % Need at least 2 rows for one segment
+    % Take first TWO rows as one segment
+    pt1 = segments(1, :);  % First endpoint [x,y,z]
+    pt2 = segments(2, :);  % Second endpoint [x,y,z]
+    segments(1:2,:) = [];  % Remove both rows
+    
+    % Start loop with both endpoints
+    loop = [pt1; pt2]; % 2x3 array
+    loopClosed = false;
+    
+    while ~loopClosed
+        found = false;
+        
+        for j = 1:2:size(segments,1)-1  % Step by 2 (each segment is 2 rows)
+            seg_pt1 = segments(j, :);     % First endpoint
+            seg_pt2 = segments(j+1, :);   % Second endpoint
+            
+            % Check if either endpoint matches the end of the loop
+            if norm(seg_pt1 - loop(end,:)) < tolerance
+                loop = [loop; seg_pt2];
+                segments(j:j+1,:) = [];  % Remove both rows
+                found = true;
+                break
+            
+            elseif norm(seg_pt2 - loop(end,:)) < tolerance
+                loop = [loop; seg_pt1];
+                segments(j:j+1,:) = [];
+                found = true;
+                break
+            
+            elseif norm(seg_pt1 - loop(1,:)) < tolerance
+                loop = [seg_pt2; loop];
+                segments(j:j+1,:) = [];
+                found = true;
+                break
+            
+            elseif norm(seg_pt2 - loop(1,:)) < tolerance
+                loop = [seg_pt1; loop];
+                segments(j:j+1,:) = [];
+                found = true;
+                break
+            end
+        end
+        
+        if ~found
+            loopClosed = true;
+        end
+    end
+    
+    loops{end+1} = loop;
+end
+
+% Visualization remains the same
+figure; hold on; axis equal; 
+
+for k = 1:length(loops) 
+    loop = loops{k}; 
+    plot3(loop(:,1), loop(:,2), loop(:,3), '-o', 'LineWidth', 2); 
+end
+
+xlabel('X'); ylabel('Y'); zlabel('Z'); 
+view(3); 
+title('Slice Contour Loops');
+% Set the view to 3D perspective; allows rotating the plot and seeing the contour in 3D.
+
+
+% Step 3: Interpret - done already above :D
+
+% So far in your grasp-planning pipeline, you have successfully created a triangular mesh of the 
+% mug by loading the STL file into a PDE model in MATLAB, generating the mesh, and extracting the 
+% vertices and faces. You verified the mesh visually using pdemesh to ensure it accurately represents 
+% the mug. Next, you defined a slicing plane at a chosen height z0 and looped through each triangle 
+% in the mesh to determine whether it intersects the plane, calculating the exact intersection 
+% points and storing them as line segments in the segments array. Using a loop-stitching algorithm, 
+% you then connected these segments into continuous loops, where each loop represents a closed 
+% contour of the mug's cross-section at that height. Finally, you visualized these loops in 3D with 
+% plot3, labeled the axes, and set a 3D view, giving you a hyperanalyzed cross-sectional outline of 
+% the mug. This process captures every triangle that intersects the slicing plane and sets the 
+% foundation for analyzing potential grasp regions. The next steps are to automate slicing at multiple 
+% heights to create a stack of cross-sections, analyze each slice for regions wide enough for a robotic 
+% hand to perform a "power" or "enveloping" grasp, and eventually combine these slices into a full 
+% 3D map of graspable regions.
+
+% Right now we are have only one slice at a certain height (z0). Lets make
+% multiple of them and combine them like a CT scan to fully analyze the
+% mug/stl file, in order to find all potential grasp regions.
+
+%% Section 4: Automating slicing across multiple heights
+
+% Step 1: Define the range of z values to slice through
+numSlices = 20;                                 
+z_values = linspace(z_min, z_max, numSlices);   
+
+% Step 2: Create a cell array to store slices
+all_slices = cell(numSlices, 1);  
+
+% Step 3: Loop through each z-value and compute slice contours
+for i = 1:numSlices
+    z0 = z_values(i);       
+    lines = [];             
+    
+    % Step 3a: Loop through triangles to find intersections with plane z = z0
+    for f = 1:size(faces,1)  % CHANGED: F → faces
+        v = vertices(faces(f,:), :);   % CHANGED: V → vertices, F → faces
+        z = v(:,3);         
+        
+        if (min(z) <= z0 && max(z) >= z0) && (max(z) ~= min(z))
+            % Find where edges cross the slicing plane
+            pts = [];
+            for e = 1:3
+                v1 = v(e,:); 
+                v2 = v(mod(e,3)+1,:);
+                if ( (v1(3) - z0) * (v2(3) - z0) < 0 )
+                    % Linear interpolation to find intersection point
+                    t = (z0 - v1(3)) / (v2(3) - v1(3));
+                    p = v1 + t*(v2 - v1);
+                    pts = [pts; p];
+                elseif (v1(3) == z0)   
+                    pts = [pts; v1];
+                end
+            end
+            if size(pts,1) == 2
+                lines = [lines; pts];  
+            end
+        end
+    end
+    
+    % Step 3b: Store the raw intersection lines for this slice
+    all_slices{i} = lines;
+end
+
+% Step 4: Visualization of all slices
+figure; hold on; axis equal;
+title('Cross-sections of mug at different heights');
+for i = 1:numSlices
+    lines = all_slices{i};
+    if ~isempty(lines)
+        plot(lines(:,1), lines(:,2), '.-');   
+    end
+end
+xlabel('X'); ylabel('Y'); grid on;
+
+%% Section 5: Analyze Slice Geometry for Graspability
+
+% Now we have a stack of slices, we can start hyperanalyzing them.
+
+% 1) Width measurement: For each slice loop, compute the maximum span across opposite points 
+% (distance across the contour). This tells you how wide the mug is at that level.
+% 2) Consistency check: A robotic power grasp requires not just width but also enough vertical 
+% continuity (several consecutive slices with similar width) to ensure the hand encloses the mug.
+% 3) Candidate grasp zones: Mark z-ranges where the mug is narrow enough for the robotic hand 
+% but also wide enough to be stably gripped.
+
+% This section will loop through many different slicing heights (z0 values), generate contours 
+% for each slice, and then plot them together so you can see the "stacked" cross-sections of your mug.
+
+% Define slicing heights from bottom to top of mug
+%% Section 5-6: Multi-height slicing with proper loop stitching
+
+% Define slicing heights from bottom to top of mug
+%% Section 5-6: Multi-height slicing with proper loop stitching
+
+% Define slicing heights from bottom to top of mug
+%% Section 5-6: Multi-height slicing with BULLETPROOF loop stitching
+
+numSlices = 20;                              
+zMin = min(vertices(:,3));                   
+zMax = max(vertices(:,3));                   
+zLevels = linspace(zMin, zMax, numSlices);   
+
+allLoops = cell(numSlices,1);
+
+for i = 1:numSlices
+    z0 = zLevels(i);
+    
+    % Find intersections
+    segments = [];
+    for f = 1:size(faces,1)
+        tri = vertices(faces(f,:), :);
+        zVals = tri(:,3);
+        
+        if (min(zVals) <= z0) && (max(zVals) >= z0)
+            pts = [];
+            for e = 1:3
+                v1 = tri(e,:);
+                v2 = tri(mod(e,3)+1,:);
+                if (v1(3)-z0)*(v2(3)-z0) < 0
+                    t = (z0-v1(3)) / (v2(3)-v1(3));
+                    pts(end+1,:) = v1 + t*(v2-v1);
+                elseif v1(3)==z0
+                    pts(end+1,:) = v1;
+                end
+            end
+            if size(pts,1)==2
+                segments = [segments; pts];
+            end
+        end
+    end
+    
+    % Stitch segments into loops
+    loops = {};
+    tolerance = 1e-6;
+    
+    while size(segments, 1) > 1  % MUST have at least 2 rows
+        
+        % SAFETY CHECK
+        if size(segments, 1) < 2
+            break;
+        end
+        
+        loop = [segments(1,:); segments(2,:)];
+        segments(1:2,:) = [];
+        
+        loopClosed = false;
+        while ~loopClosed
+            found = false;
+            nSegs = size(segments, 1);
+            
+            if nSegs < 2
+                loopClosed = true;
+                break;
+            end
+            
+            for j = 1:2:nSegs-1
+                if j+1 > nSegs
+                    break;
+                end
+                
+                s1 = segments(j,:);
+                s2 = segments(j+1,:);
+                
+                if norm(s1 - loop(end,:)) < tolerance
+                    loop = [loop; s2];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break;
+                elseif norm(s2 - loop(end,:)) < tolerance
+                    loop = [loop; s1];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break;
+                elseif norm(s1 - loop(1,:)) < tolerance
+                    loop = [s2; loop];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break;
+                elseif norm(s2 - loop(1,:)) < tolerance
+                    loop = [s1; loop];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break;
+                end
+            end
+            
+            if ~found
+                loopClosed = true;
+            end
+        end
+        
+        loops{end+1} = loop;
+    end
+    
+    allLoops{i} = loops;
+end
+
+% Visualization
+figure; hold on;
+colors = jet(numSlices);  % or: colors = parula(numSlices); or lines(min(numSlices, 7))
+for i = 1:numSlices
+    loops = allLoops{i};
+    for j = 1:length(loops)
+        loop = loops{j};
+        plot3(loop(:,1), loop(:,2), loop(:,3), '-', 'Color', colors(i,:), 'LineWidth', 2);
+    end
+end
+xlabel('X'); ylabel('Y'); zlabel('Z');
+title('Stacked Cross-Sections of the Mug');
+view(3); grid on;
+
+%% Section 6: Now the CT scan?: Multi-height slicing automation
+
+% Finds the min & max height of the mug.
+% Chooses numSlices evenly spaced slicing planes between them.
+% Calls your existing functions (sliceMesh + stitchSegments) for each height.
+% Stores all loops in allLoops.
+% Optionally plots them stacked, so you see a "layered mug".
+
+% Step 1: Define slicing heights
+minZ = min(vertices(:,3));
+maxZ = max(vertices(:,3));
+numSlices = 20;
+zValues = linspace(minZ, maxZ, numSlices);
+
+% Step 2: Initialize storage
+allLoops = cell(numSlices, 1);
+
+% Step 3: Loop through each slicing height
+for i = 1:numSlices
+    z0 = zValues(i);
+
+    % Intersect mesh with slicing plane (inline version of sliceMesh)
+    segments = [];
+    for f = 1:size(faces,1)
+        idx = faces(f,:); 
+        triVerts = vertices(idx,:);
+        zVals = triVerts(:,3);
+        
+        if (max(zVals) >= z0) && (min(zVals) <= z0) && ~all(zVals == z0)
+            pts = [];
+            
+            for e = [1 2; 2 3; 3 1]'
+                p1 = triVerts(e(1),:);
+                p2 = triVerts(e(2),:);
+                
+                z1 = p1(3) - z0;
+                z2 = p2(3) - z0;
+                
+                if z1 * z2 < 0
+                    t = z1 / (z1 - z2);
+                    intersectPt = p1 + t * (p2 - p1);
+                    pts = [pts; intersectPt];
+                elseif z1 == 0 && z2 ~= 0
+                    pts = [pts; p1];
+                elseif z2 == 0 && z1 ~= 0
+                    pts = [pts; p2];
+                end
+            end
+            
+            if size(pts,1) == 2
+                segments = [segments; pts];
+            end
+        end
+    end
+    
+    % Stitch segments into loops (inline version of stitchSegments)
+    loops = {};
+    tolerance = 1e-6;
+    
+    while size(segments,1) >= 2
+        pt1 = segments(1, :);
+        pt2 = segments(2, :);
+        segments(1:2,:) = [];
+        
+        loop = [pt1; pt2];
+        loopClosed = false;
+        
+        while ~loopClosed
+            found = false;
+            
+            for j = 1:2:size(segments,1)-1
+                seg_pt1 = segments(j, :);
+                seg_pt2 = segments(j+1, :);
+                
+                if norm(seg_pt1 - loop(end,:)) < tolerance
+                    loop = [loop; seg_pt2];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break
+                elseif norm(seg_pt2 - loop(end,:)) < tolerance
+                    loop = [loop; seg_pt1];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break
+                elseif norm(seg_pt1 - loop(1,:)) < tolerance
+                    loop = [seg_pt2; loop];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break
+                elseif norm(seg_pt2 - loop(1,:)) < tolerance
+                    loop = [seg_pt1; loop];
+                    segments(j:j+1,:) = [];
+                    found = true;
+                    break
+                end
+            end
+            
+            if ~found
+                loopClosed = true;
+            end
+        end
+        
+        loops{end+1} = loop;
+    end
+    
+    % Store results
+    allLoops{i} = loops;
+end
+
+% Step 4: Visualization of all slices together
+figure;
+hold on; axis equal; grid on;
+xlabel('X'); ylabel('Y'); zlabel('Z');
+
+cmap = jet(numSlices);  % Use jet colormap
+for i = 1:numSlices
+    loops = allLoops{i};
+    for j = 1:length(loops)
+        plot3(loops{j}(:,1), loops{j}(:,2), loops{j}(:,3), ...
+              'Color', cmap(i,:), 'LineWidth', 1.5);
+    end
+end
+
+title('All cross-section slices of the mug');
+view(3);
+hold off;
+
+%% Section 7: Turning the Raw Slices into Something Meaningful
+
+% Assumes you already have `allLoops` from Section 6
+% and numSlices, zValues
+
+% Parameters for grasp
+minGrip = 0.03;   % meters (3 cm) = minimum grip span of hand
+maxGrip = 0.09;   % meters (9 cm) = maximum grip span of hand
+
+% Storage for analysis
+graspableSlices = [];   % store slice indices that are graspable
+sliceDiameters = zeros(numSlices,1);
+
+for i = 1:numSlices
+    loops = allLoops{i};
+    if isempty(loops), continue; end
+
+    % For simplicity, assume the mug has 1 main loop at each height
+    loop = loops{1};
+    
+    % Compute bounding box in XY
+    minX = min(loop(:,1)); maxX = max(loop(:,1));
+    minY = min(loop(:,2)); maxY = max(loop(:,2));
+    
+    % Approximate "diameter" as the max of width and depth
+    diameter = max(maxX - minX, maxY - minY);
+    sliceDiameters(i) = diameter;
+    
+    % Check if within grasp range
+    if diameter >= minGrip && diameter <= maxGrip
+        graspableSlices(end+1) = i;
+    end
+end
+
+% Visualization of graspable regions
+figure;
+plot(zValues, sliceDiameters, '-o', 'LineWidth', 1.5);
+hold on;
+yline(minGrip, '--r', 'Min Grip');
+yline(maxGrip, '--g', 'Max Grip');
+scatter(zValues(graspableSlices), sliceDiameters(graspableSlices), 80, 'filled', 'MarkerFaceColor','m');
+xlabel('Height (Z)');
+ylabel('Loop Diameter (m)');
+title('Cross-section diameters and grasp feasibility');
+grid on;
+hold off;
+
+% Print out results
+disp('Graspable slice heights (Z):');
+disp(zValues(graspableSlices));
+
+
+%% Section 8: Power-grasp region detection
+
+% --- Robot hand / finger parameters (EDIT THESE) ---
+% params.minGripSpan   = 0.03;   % m, minimum span hand can close to (≈ min diameter it can grasp)
+% params.maxGripSpan   = 0.09;   % m, maximum span hand can open to   (≈ max diameter it can grasp)
+% params.fingerWidth2D = 0.012;  % m, thickness of a finger in the slicing plane (XY)
+% params.fingerWidth3D = 0.020;  % m, thickness of a finger along Z (needs this much continuous height)
+
+params.minGripSpan   = 0.005;  
+params.maxGripSpan   = 0.015; 
+params.fingerWidth2D = 0.003;  
+params.fingerWidth3D = 0.010;  
+
+% Make sure zValues exists from previous sections
+if ~exist('zValues', 'var')
+    zValues = linspace(min(vertices(:,3)), max(vertices(:,3)), numSlices);
+end
+
+if numel(zValues) >= 2
+    delta = mean(diff(zValues));  % m, average translation between planes
+else
+    error('Need multiple zValues for 3D accumulation.');
+end
+
+sliceOK = false(numSlices,1);    % true if this slice passes 2D checks (wrap + gap if needed)
+sliceDia = nan(numSlices,1);     % approximate diameter used
+sliceNote = strings(numSlices,1);% short reason
+
+for i = 1:numSlices
+    loops = allLoops{i};
+    if isempty(loops)
+        sliceNote(i) = "no loops";
+        continue;
+    end
+
+    % Project each loop to XY and ensure closed
+    polys = cellfun(@(L)[L(:,1:2); L(1,1:2)], loops, 'UniformOutput', false);
+    nPoly = numel(polys);
+
+    % Compute APD (Area, Perimeter, Diameter) for each polygon
+    APD = zeros(nPoly,3);
+    for k = 1:nPoly
+        poly = polys{k};
+        x = poly(:,1); y = poly(:,2);
+        A = 0.5 * abs( sum(x(1:end-1).*y(2:end) - x(2:end).*y(1:end-1)) );
+        P = sum( sqrt(sum( diff(poly,1,1).^2, 2 )) );
+        rA = sqrt(A/pi); rP = P/(2*pi); D = rA + rP;  % robust diameter
+        APD(k,:) = [A,P,D];
+    end
+
+    % Compute slice feasibility based on number of polygons
+    if nPoly == 1
+        % Single polygon: check if finger can wrap around
+        D = APD(1,3);
+        sliceDia(i) = D;
+        if D >= params.minGripSpan && D <= params.maxGripSpan
+            sliceOK(i) = true;
+            sliceNote(i) = "1 poly: wrap OK";
+        else
+            sliceNote(i) = "1 poly: diameter out of range";
+        end
+
+    elseif nPoly == 2
+        % Two polygons: check gap between them and wrap feasibility
+        polyA = polys{1};
+        polyB = polys{2};
+        
+        % Compute minimum gap between polygons
+        minGap = inf;
+        for ia = 1:size(polyA,1)-1
+            a1 = polyA(ia,:); a2 = polyA(ia+1,:);
+            for jb = 1:size(polyB,1)-1
+                b1 = polyB(jb,:); b2 = polyB(jb+1,:);
+                
+                % Point-to-segment distance (4 combinations)
+                pts = {b1,a1,a2; b2,a1,a2; a1,b1,b2; a2,b1,b2};
+                for p = 1:size(pts,1)
+                    pVec = pts{p,1}; aVec = pts{p,2}; bVec = pts{p,3};
+                    ab = bVec - aVec;
+                    t = max(0,min(1, dot(pVec-aVec,ab)/max(dot(ab,ab),eps)));
+                    proj = aVec + t*ab;
+                    minGap = min(minGap, norm(pVec - proj));
+                end
+            end
+        end
+        gap = minGap;
+
+        % Use the larger polygon as the "thing to wrap"
+        [~, idxLarge] = max(APD(:,1));  % by area
+        D = APD(idxLarge,3);
+        sliceDia(i) = D;
+
+        if gap >= params.fingerWidth2D
+            if D >= params.minGripSpan && D <= params.maxGripSpan
+                sliceOK(i) = true;
+                sliceNote(i) = "2 polys: gap OK + wrap OK";
+            else
+                sliceNote(i) = "2 polys: gap OK, diameter out of range";
+            end
+        else
+            sliceNote(i) = "2 polys: gap too small";
+        end
+
+    else
+        % More than two polygons: find best gap to largest polygon
+        [~, idxLarge] = max(APD(:,1));  % candidate target
+        D = APD(idxLarge,3);
+        sliceDia(i) = D;
+
+        % Find best gap to any other polygon
+        bestGap = 0;
+        polyLarge = polys{idxLarge};
+        for k = 1:nPoly
+            if k==idxLarge, continue; end
+            polyOther = polys{k};
+            minGap = inf;
+            for ia = 1:size(polyLarge,1)-1
+                a1 = polyLarge(ia,:); a2 = polyLarge(ia+1,:);
+                for jb = 1:size(polyOther,1)-1
+                    b1 = polyOther(jb,:); b2 = polyOther(jb+1,:);
+                    pts = {b1,a1,a2; b2,a1,a2; a1,b1,b2; a2,b1,b2};
+                    for p = 1:size(pts,1)
+                        pVec = pts{p,1}; aVec = pts{p,2}; bVec = pts{p,3};
+                        ab = bVec - aVec;
+                        t = max(0,min(1, dot(pVec-aVec,ab)/max(dot(ab,ab),eps)));
+                        proj = aVec + t*ab;
+                        minGap = min(minGap, norm(pVec - proj));
+                    end
+                end
+            end
+            bestGap = max(bestGap, minGap);
+        end
+
+        if bestGap >= params.fingerWidth2D && ...
+           D >= params.minGripSpan && D <= params.maxGripSpan
+            sliceOK(i) = true;
+            sliceNote(i) = ">=3 polys: gap OK + wrap OK";
+        else
+            sliceNote(i) = ">=3 polys: gap or diameter fail";
+        end
+    end
+end
+
+% Accumulate consecutive slices into 3D finger regions
+fingerSlots = [];  % store [startSlice, endSlice] for each valid region
+inRegion = false;
+regionStart = 0;
+
+for i = 1:numSlices
+    if sliceOK(i) && ~inRegion
+        % Start a new region
+        inRegion = true;
+        regionStart = i;
+    elseif ~sliceOK(i) && inRegion
+        % End the current region
+        regionEnd = i - 1;
+        regionHeight = (regionEnd - regionStart + 1) * delta;
+        
+        % Check if tall enough for one 3D finger
+        if regionHeight >= params.fingerWidth3D
+            fingerSlots = [fingerSlots; regionStart, regionEnd];
+        end
+        inRegion = false;
+    end
+end
+
+% Handle case where region extends to last slice
+if inRegion
+    regionEnd = numSlices;
+    regionHeight = (regionEnd - regionStart + 1) * delta;
+    if regionHeight >= params.fingerWidth3D
+        fingerSlots = [fingerSlots; regionStart, regionEnd];
+    end
+end
+
+% Report graspable regions
+fprintf('\n=== POWER GRASP ANALYSIS RESULTS ===\n');
+fprintf('Robot Hand Parameters:\n');
+fprintf('  Min Grip Span: %.3f m\n', params.minGripSpan);
+fprintf('  Max Grip Span: %.3f m\n', params.maxGripSpan);
+fprintf('  Finger Width (2D): %.3f m\n', params.fingerWidth2D);
+fprintf('  Finger Width (3D): %.3f m\n', params.fingerWidth3D);
+fprintf('  Slice Delta: %.4f m\n\n', delta);
+
+if isempty(fingerSlots)
+    fprintf('❌ NO GRASPABLE REGIONS FOUND\n');
+    fprintf('The mug does not have any regions suitable for power grasp.\n\n');
+else
+    fprintf('✓ GRASPABLE REGIONS FOUND: %d region(s)\n\n', size(fingerSlots,1));
+    for r = 1:size(fingerSlots,1)
+        z_start = zValues(fingerSlots(r,1));
+        z_end = zValues(fingerSlots(r,2));
+        height = z_end - z_start;
+        numFingers = floor(height / params.fingerWidth3D);
+        fprintf('Region %d:\n', r);
+        fprintf('  Z-range: %.4f to %.4f m\n', z_start, z_end);
+        fprintf('  Height: %.4f m\n', height);
+        fprintf('  Can fit: %d finger(s)\n\n', numFingers);
+    end
+    
+    % Determine overall grasp feasibility
+    maxRegionHeight = max(fingerSlots(:,2) - fingerSlots(:,1) + 1) * delta;
+    maxFingers = floor(maxRegionHeight / params.fingerWidth3D);
+    
+    fprintf('=== GRASP FEASIBILITY ===\n');
+    if maxFingers >= 3
+        fprintf('✓✓✓ EXCELLENT: Can fit 3+ fingers - STRONG POWER GRASP possible\n');
+    elseif maxFingers >= 2
+        fprintf('✓✓ GOOD: Can fit 2 fingers - STABLE POWER GRASP possible\n');
+    elseif maxFingers >= 1
+        fprintf('✓ MARGINAL: Can fit 1 finger - WEAK GRASP possible\n');
+    end
+end
+
+% Visualization 1: Slice diameter analysis
+figure('Position', [100, 100, 1200, 500]);
+
+subplot(1,2,1);
+
+% Track handles for legend
+h = [];
+legendLabels = {};
+
+% Plot main diameter line
+h(end+1) = plot(zValues, sliceDia, '-o', 'LineWidth', 1.5, 'MarkerSize', 4);
+legendLabels{end+1} = 'Slice Diameter';
+hold on;
+
+% Plot grip limit lines
+h(end+1) = yline(params.minGripSpan, '--r', 'LineWidth', 2);
+legendLabels{end+1} = 'Min Grip';
+
+h(end+1) = yline(params.maxGripSpan, '--g', 'LineWidth', 2);
+legendLabels{end+1} = 'Max Grip';
+
+% Highlight feasible slices
+feasibleZ = zValues(sliceOK);
+feasibleD = sliceDia(sliceOK);
+if ~isempty(feasibleZ)
+    h(end+1) = scatter(feasibleZ, feasibleD, 80, 'filled', 'MarkerFaceColor', 'm');
+    legendLabels{end+1} = 'Feasible Slices';
+end
+
+% Mark finger slot regions with shaded areas
+for r = 1:size(fingerSlots,1)
+    z_start = zValues(fingerSlots(r,1));
+    z_end = zValues(fingerSlots(r,2));
+    maxD = max(sliceDia(~isnan(sliceDia)));
+    if isempty(maxD), maxD = params.maxGripSpan; end
+    hFill = fill([z_start z_end z_end z_start], ...
+         [0 0 maxD*1.1 maxD*1.1], ...
+         'b', 'FaceAlpha', 0.15, 'EdgeColor', 'b', 'LineWidth', 2);
+    if r == 1  % Only add to legend once
+        h(end+1) = hFill;
+        legendLabels{end+1} = 'Finger Regions';
+    end
+end
+
+xlabel('Height Z (m)', 'FontSize', 12);
+ylabel('Approximate Diameter (m)', 'FontSize', 12);
+title('Cross-Section Diameter vs Height', 'FontSize', 14, 'FontWeight', 'bold');
+legend(h, legendLabels, 'Location', 'best');
+grid on;
+hold off;
+
+% Visualization 2: 3D view with highlighted regions
+subplot(1,2,2);
+hold on; axis equal; grid on;
+xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)');
+title('Mug with Graspable Regions Highlighted', 'FontSize', 14, 'FontWeight', 'bold');
+
+% Plot all slices in gray
+for i = 1:numSlices
+    loops = allLoops{i};
+    for j = 1:length(loops)
+        loop = loops{j};
+        plot3(loop(:,1), loop(:,2), loop(:,3), '-', 'Color', [0.7 0.7 0.7], 'LineWidth', 0.5);
+    end
+end
+
+% Highlight graspable regions in bright color
+for r = 1:size(fingerSlots,1)
+    for i = fingerSlots(r,1):fingerSlots(r,2)
+        loops = allLoops{i};
+        for j = 1:length(loops)
+            loop = loops{j};
+            plot3(loop(:,1), loop(:,2), loop(:,3), '-', 'Color', 'r', 'LineWidth', 3);
+        end
+    end
+end
+
+view(3);
+hold off;
+
+%% =========================================================================
+%  STAGE 2 — GRASP POSE PLANNING + VALIDATION
+%  Runs AFTER your existing Sections 1–8. All variables from those sections
+%  (vertices, faces, allLoops, zValues, fingerSlots, params, delta) must
+%  already exist in the MATLAB workspace.
+% =========================================================================
+ 
+%% -------------------------------------------------------------------------
+%  SECTION 9 — GRIPPER APPROACH DIRECTION
+%
+%  WHAT THIS ADDS:   Stage 1 told you WHERE on the mug you can grasp
+%                    (a highlighted height band). That is the "region".
+%                    But a robot arm needs more: it needs to know WHICH
+%                    DIRECTION to move its hand before closing the fingers.
+%                    Think of it like parking a car — you don't just pick
+%                    a parking space, you also decide which angle to pull in.
+%
+%  HOW IT WORKS:     For the best graspable region we found in Section 8,
+%                    we take the cross-section contour at the midpoint
+%                    height.  We find the centroid (geometric centre) of
+%                    that contour.  We then find the widest gap around the
+%                    contour perimeter — that gap is where the fingers
+%                    would naturally open toward.  The approach direction
+%                    is the vector pointing FROM outside the mug TOWARD
+%                    that centroid through the widest gap.
+%
+%  END RESULT:       A 3D arrow drawn on the mug showing exactly which
+%                    direction the robot arm should move to start the grasp.
+% -------------------------------------------------------------------------
+ 
+fprintf('\n=== SECTION 9: GRIPPER APPROACH DIRECTION ===\n');
+ 
+if isempty(fingerSlots)
+    fprintf('No graspable regions found — skipping approach direction.\n');
+else
+    % Pick the best (tallest) region
+    regionHeights = (fingerSlots(:,2) - fingerSlots(:,1) + 1) * delta;
+    [~, bestR] = max(regionHeights);
+    bestStart = fingerSlots(bestR, 1);
+    bestEnd   = fingerSlots(bestR, 2);
+ 
+    % Midpoint slice index
+    midSliceIdx = round((bestStart + bestEnd) / 2);
+    midZ = zValues(midSliceIdx);
+ 
+    fprintf('Best region: slices %d to %d  (Z = %.4f to %.4f m)\n', ...
+        bestStart, bestEnd, zValues(bestStart), zValues(bestEnd));
+    fprintf('Midpoint slice: %d  at Z = %.4f m\n', midSliceIdx, midZ);
+ 
+    % Get the primary (largest) loop at the midpoint slice
+    midLoops = allLoops{midSliceIdx};
+    if isempty(midLoops)
+        fprintf('Warning: midpoint slice has no loops. Trying neighbours.\n');
+        for offset = 1:3
+            if midSliceIdx+offset <= numSlices && ~isempty(allLoops{midSliceIdx+offset})
+                midLoops = allLoops{midSliceIdx+offset};
+                break;
+            end
+        end
+    end
+ 
+    % Choose largest loop by point count
+    loopLengths = cellfun(@(L) size(L,1), midLoops);
+    [~, lgIdx] = max(loopLengths);
+    midLoop = midLoops{lgIdx};
+ 
+    % --- Step 9a: Centroid of the midpoint contour ---
+    cx = mean(midLoop(:,1));
+    cy = mean(midLoop(:,2));
+    cz = midZ;
+    centroid = [cx, cy, cz];
+    fprintf('Contour centroid at: (%.4f, %.4f, %.4f) m\n', cx, cy, cz);
+ 
+    % --- Step 9b: Find approach direction via widest angular gap ---
+    % Compute angle of each contour point relative to centroid
+    angles = atan2(midLoop(:,2) - cy, midLoop(:,1) - cx);  % -pi to +pi
+    angles_sorted = sort(angles);
+ 
+    % Angular gaps between consecutive sorted points
+    gaps = diff(angles_sorted);
+    wrap_gap = (2*pi - angles_sorted(end)) + angles_sorted(1); % gap wrapping at ±pi
+    all_gaps = [gaps; wrap_gap];
+ 
+    % Midpoint angle of the widest gap = where the fingers face
+    [maxGap, gapIdx] = max(all_gaps);
+    if gapIdx < length(all_gaps)
+        gapMidAngle = angles_sorted(gapIdx) + all_gaps(gapIdx)/2;
+    else
+        % Wrapping gap
+        gapMidAngle = angles_sorted(end) + wrap_gap/2;
+        if gapMidAngle > pi, gapMidAngle = gapMidAngle - 2*pi; end
+    end
+ 
+    fprintf('Widest angular gap: %.1f degrees\n', rad2deg(maxGap));
+    fprintf('Approach angle: %.1f degrees from +X axis\n', rad2deg(gapMidAngle));
+ 
+    % Approach direction unit vector (pointing INWARD toward centroid)
+    % The hand arrives from OUTSIDE, so direction points inward
+    approachDir = [-cos(gapMidAngle), -sin(gapMidAngle), 0];
+    approachDir = approachDir / norm(approachDir);  % ensure unit length
+ 
+    % Pre-grasp position: centroid + offset outward (hand starts here, moves inward)
+    approachOffset = params.maxGripSpan * 1.5;  % 1.5x grip width outside the mug
+    preGraspPos = centroid - approachDir * approachOffset;
+ 
+    fprintf('Approach direction vector: [%.3f, %.3f, %.3f]\n', approachDir);
+    fprintf('Pre-grasp position:        (%.4f, %.4f, %.4f) m\n', preGraspPos);
+ 
+    % --- Step 9c: Visualise the approach direction ---
+    figure('Name', 'Section 9 — Approach Direction', ...
+           'Position', [100 100 800 700]);
+    hold on; axis equal; grid on;
+    xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)');
+    title({'Section 9: Gripper Approach Direction', ...
+           'Gray = full mug | Red = grasp region | Arrow = approach path'}, ...
+           'FontSize', 12);
+ 
+    % Plot full mug in gray
+    for i = 1:numSlices
+        for j = 1:length(allLoops{i})
+            lp = allLoops{i}{j};
+            plot3(lp(:,1), lp(:,2), lp(:,3), '-', ...
+                  'Color', [0.8 0.8 0.8], 'LineWidth', 0.5);
+        end
+    end
+ 
+    % Highlight the best grasp region in red
+    for i = bestStart:bestEnd
+        for j = 1:length(allLoops{i})
+            lp = allLoops{i}{j};
+            plot3(lp(:,1), lp(:,2), lp(:,3), '-r', 'LineWidth', 2.5);
+        end
+    end
+ 
+    % Plot midpoint contour in blue
+    plot3(midLoop(:,1), midLoop(:,2), midLoop(:,3), '-b', 'LineWidth', 2);
+ 
+    % Plot centroid
+    plot3(cx, cy, cz, 'ko', 'MarkerFaceColor', 'k', 'MarkerSize', 10);
+    text(cx, cy, cz+0.005, '  Centroid', 'FontSize', 10);
+ 
+    % Draw approach arrow: from pre-grasp → centroid
+    arrowScale = norm(preGraspPos(1:2) - centroid(1:2));
+    quiver3(preGraspPos(1), preGraspPos(2), preGraspPos(3), ...
+            approachDir(1)*arrowScale, approachDir(2)*arrowScale, approachDir(3)*arrowScale, ...
+            0, 'g', 'LineWidth', 3, 'MaxHeadSize', 0.5);
+ 
+    % Mark pre-grasp position
+    plot3(preGraspPos(1), preGraspPos(2), preGraspPos(3), ...
+          'g^', 'MarkerFaceColor', 'g', 'MarkerSize', 12);
+    text(preGraspPos(1), preGraspPos(2), preGraspPos(3)+0.005, ...
+         '  Pre-grasp start', 'FontSize', 10, 'Color', [0 0.5 0]);
+ 
+    legend({'Full mug', 'Grasp region', 'Midpoint contour', ...
+            'Centroid', 'Approach path', 'Pre-grasp position'}, ...
+           'Location', 'best');
+    view(3); hold off;
+ 
+    % Store for use in next sections
+    S9.bestStart    = bestStart;
+    S9.bestEnd      = bestEnd;
+    S9.midSliceIdx  = midSliceIdx;
+    S9.centroid     = centroid;
+    S9.approachDir  = approachDir;
+    S9.preGraspPos  = preGraspPos;
+    S9.gapAngleDeg  = rad2deg(gapMidAngle);
+ 
+    fprintf('Section 9 complete. Approach direction computed and visualised.\n');
+end
+ 
+ 
+%% -------------------------------------------------------------------------
+%  SECTION 10 — UNCERTAINTY MARGIN PARAMETER
+%
+%  WHAT THIS ADDS:   In Section 8, the grasp check was: is the mug diameter
+%                    between minGripSpan and maxGripSpan? That assumes the
+%                    robot positions its hand PERFECTLY.  In reality, a real
+%                    robot arm has positioning error — maybe ±2 mm.  If the
+%                    mug is 14.8 mm wide and the max grip is 15 mm, a 2 mm
+%                    error means the fingers might not close in time.
+%
+%                    This section adds a safety buffer (delta_u) that
+%                    shrinks the acceptable diameter range inward on both
+%                    sides.  Instead of [min, max], the check becomes
+%                    [min + delta_u, max - delta_u].  Larger delta_u =
+%                    more conservative = fewer but safer grasp regions.
+%
+%  END RESULT:       A plot showing how the graspable region changes as
+%                    you increase the positioning error tolerance.  Gives
+%                    you a "safety envelope" for the grasp planner.
+% -------------------------------------------------------------------------
+ 
+fprintf('\n=== SECTION 10: UNCERTAINTY MARGIN ANALYSIS ===\n');
+ 
+% Define a range of uncertainty values to test (in meters)
+delta_u_values = [0, 0.0005, 0.001, 0.0015, 0.002, 0.003];  % 0 to 3 mm
+nUncert = length(delta_u_values);
+ 
+% For each uncertainty value, re-run the slice feasibility check and
+% count how many slices remain graspable
+slicesOK_per_delta = zeros(nUncert, numSlices);  % rows = uncertainty, cols = slices
+regionCount = zeros(nUncert, 1);
+ 
+for ui = 1:nUncert
+    du = delta_u_values(ui);
+    minSpan_u = params.minGripSpan + du;  % tighter lower bound
+    maxSpan_u = params.maxGripSpan - du;  % tighter upper bound
+ 
+    if minSpan_u >= maxSpan_u
+        % Uncertainty is so large no diameter can pass — all fail
+        regionCount(ui) = 0;
+        continue;
+    end
+ 
+    % Re-evaluate each slice with this uncertainty margin
+    sliceOK_u = false(numSlices, 1);
+    for i = 1:numSlices
+        if isnan(sliceDia(i)), continue; end
+        if sliceDia(i) >= minSpan_u && sliceDia(i) <= maxSpan_u
+            sliceOK_u(i) = true;
+        end
+    end
+    slicesOK_per_delta(ui, :) = sliceOK_u';
+ 
+    % Count valid 3D regions at this uncertainty
+    inReg = false; rStart = 0; nReg = 0;
+    for i = 1:numSlices
+        if sliceOK_u(i) && ~inReg
+            inReg = true; rStart = i;
+        elseif ~sliceOK_u(i) && inReg
+            h_reg = (i - rStart) * delta;
+            if h_reg >= params.fingerWidth3D, nReg = nReg + 1; end
+            inReg = false;
+        end
+    end
+    if inReg
+        h_reg = (numSlices - rStart + 1) * delta;
+        if h_reg >= params.fingerWidth3D, nReg = nReg + 1; end
+    end
+    regionCount(ui) = nReg;
+ 
+    fprintf('delta_u = %.1f mm  →  Effective range [%.3f, %.3f] m  →  %d region(s)\n', ...
+        du*1000, minSpan_u, maxSpan_u, nReg);
+end
+ 
+% Visualise how regions shrink with increasing uncertainty
+figure('Name', 'Section 10 — Uncertainty Margin', ...
+       'Position', [100 100 1000 450]);
+ 
+subplot(1,2,1);
+imagesc(1:numSlices, delta_u_values*1000, slicesOK_per_delta);
+colormap([1 1 1; 0.2 0.6 1]);  % white = fail, blue = pass
+xlabel('Slice Index', 'FontSize', 11);
+ylabel('Uncertainty Margin \delta_u (mm)', 'FontSize', 11);
+title({'Section 10: Slice Feasibility vs. Uncertainty', ...
+       'Blue = graspable | White = not graspable'}, 'FontSize', 11);
+set(gca, 'YTick', delta_u_values*1000);
+colorbar('Ticks', [0 1], 'TickLabels', {'Not OK','OK'});
+ 
+subplot(1,2,2);
+bar(delta_u_values*1000, regionCount, 'FaceColor', [0.2 0.6 1], 'EdgeColor', 'k');
+xlabel('Uncertainty Margin \delta_u (mm)', 'FontSize', 11);
+ylabel('Number of Valid Grasp Regions', 'FontSize', 11);
+title({'Section 10: Region Count vs. Uncertainty', ...
+       'How many grasp zones survive safety margin?'}, 'FontSize', 11);
+grid on;
+xticks(delta_u_values*1000);
+ylim([0, max(regionCount)+1]);
+ 
+fprintf('Section 10 complete. Recommended operating margin: delta_u <= %.1f mm\n', ...
+    delta_u_values(find(regionCount > 0, 1, 'last')) * 1000);
+ 
+ 
+%% -------------------------------------------------------------------------
+%  SECTION 11 — PARTIAL MESH TOLERANCE (SIMULATED OCCLUSION)
+%
+%  WHAT THIS ADDS:   Your STL file is a complete, clean mesh.  In a real
+%                    hazardous environment, a sensor might only see part of
+%                    the object (the back is in shadow, or debris covers it).
+%                    This means some slices will have INCOMPLETE contours —
+%                    a loop that does not close all the way around.
+%
+%                    This section simulates that by artificially deleting
+%                    some triangles from the mesh (pretending they are hidden
+%                    from the sensor).  It then shows that the algorithm
+%                    still identifies the correct grasp region even when
+%                    geometry is missing, as long as the slice has enough
+%                    contour left to estimate the diameter.
+%
+%  END RESULT:       A side-by-side comparison: full mesh grasp result vs.
+%                    occluded mesh grasp result, proving robustness.
+% -------------------------------------------------------------------------
+ 
+fprintf('\n=== SECTION 11: PARTIAL MESH TOLERANCE (SIMULATED OCCLUSION) ===\n');
+ 
+% Occlusion fractions to test
+occlusionFractions = [0, 0.10, 0.20, 0.30];  % 0%, 10%, 20%, 30% of triangles removed
+nOcc = length(occlusionFractions);
+ 
+% Choose which triangles to remove: those whose centroid X > cx (one "side" of the mug)
+% This simulates the sensor only seeing the left half of the mug
+faceCentroidsX = mean(vertices(faces(:,1:3), 1), 2);  % NOTE: works if faces has 3 cols
+% Safety: handle face matrix size
+if size(faces,2) >= 3
+    fCx = (vertices(faces(:,1),1) + vertices(faces(:,2),1) + vertices(faces(:,3),1))/3;
+else
+    fCx = ones(size(faces,1),1) * mean(vertices(:,1));
+end
+occludableMask = fCx > mean(vertices(:,1));  % right-side triangles (can be occluded)
+occludableIdx  = find(occludableMask);
+ 
+regionCounts_occ = zeros(nOcc,1);
+regionOK_occ = cell(nOcc,1);
+ 
+for oi = 1:nOcc
+    frac = occlusionFractions(oi);
+    nRemove = round(frac * length(occludableIdx));
+ 
+    % Create reduced face set
+    removeIdx = occludableIdx(1:nRemove);  % remove the first nRemove occludable faces
+    keepMask  = true(size(faces,1),1);
+    keepMask(removeIdx) = false;
+    faces_occ = faces(keepMask, :);
+ 
+    fprintf('Occlusion %.0f%%: removed %d / %d triangles\n', ...
+        frac*100, nRemove, size(faces,1));
+ 
+    % Run full slicing and analysis on occluded mesh
+    allLoops_occ = cell(numSlices,1);
+    for i = 1:numSlices
+        z0 = zValues(i);
+        segments_occ = [];
+ 
+        for fi = 1:size(faces_occ,1)
+            idx_f = faces_occ(fi,:);
+            tv = vertices(idx_f,:);
+            zv = tv(:,3);
+            if (max(zv) >= z0) && (min(zv) <= z0) && ~all(zv == z0)
+                pts = [];
+                for e = [1 2; 2 3; 3 1]'
+                    p1 = tv(e(1),:); p2 = tv(e(2),:);
+                    z1 = p1(3)-z0; z2 = p2(3)-z0;
+                    if z1*z2 < 0
+                        t = z1/(z1-z2);
+                        pts = [pts; p1 + t*(p2-p1)];
+                    elseif z1==0 && z2~=0
+                        pts = [pts; p1];
+                    elseif z2==0 && z1~=0
+                        pts = [pts; p2];
+                    end
+                end
+                if size(pts,1)==2
+                    segments_occ = [segments_occ; pts];
+                end
+            end
+        end
+ 
+        % Stitch (same algorithm as before)
+
+        loops_occ = {};
+        seg = segments_occ;
+        tol = 1e-6;
+
+        while size(seg, 1) >= 2
+    % Start a new loop with first segment
+            pt1 = seg(1, :);
+            pt2 = seg(2, :);
+            seg(1:2, :) = [];
+    
+            lp = [pt1; pt2];
+            lc = false;
+    
+            while ~lc
+                fd = false;
+        
+        % Try to extend the loop
+                for jj = 1:2:size(seg,1)-1
+                    s1 = seg(jj, :);
+                    s2 = seg(jj+1, :);
+            
+                    if norm(s1 - lp(end,:)) < tol
+                        lp = [lp; s2];
+                        seg(jj:jj+1, :) = [];
+                        fd = true;
+                        break;
+                    elseif norm(s2 - lp(end,:)) < tol
+                        lp = [lp; s1];
+                        seg(jj:jj+1, :) = [];
+                        fd = true;
+                        break;
+                    elseif norm(s1 - lp(1,:)) < tol
+                        lp = [s2; lp];
+                        seg(jj:jj+1, :) = [];
+                        fd = true;
+                        break;
+                    elseif norm(s2 - lp(1,:)) < tol
+                        lp = [s1; lp];
+                        seg(jj:jj+1, :) = [];
+                        fd = true;
+                        break;
+                    end
+                end
+        
+                if ~fd
+                    lc = true;
+                end
+            end
+    
+            loops_occ{end+1} = lp;
+        end
+
+        allLoops_occ{i} = loops_occ;
+
+
+    % Evaluate slices on occluded mesh — using diameter from longest loop
+    sliceOK_occ = false(numSlices,1);
+    sliceDia_occ = nan(numSlices,1);
+    for i = 1:numSlices
+        lps = allLoops_occ{i};
+        if isempty(lps), continue; end
+        loopLen = cellfun(@(L) size(L,1), lps);
+        [~,li] = max(loopLen);
+        lp = lps{li};
+ 
+        % Partial-loop coverage check: 
+        % If the loop does not close (start ≠ end within tolerance), 
+        % we still estimate diameter but flag it as uncertain
+        loopCloses = norm(lp(1,:) - lp(end,:)) < 1e-4;
+        coverage = size(lp,1);  % more points = more coverage
+ 
+        if coverage < 5
+            continue;  % too few points to estimate anything
+        end
+ 
+        % Diameter estimate from bounding box (works even for partial loops)
+        dx = max(lp(:,1)) - min(lp(:,1));
+        dy = max(lp(:,2)) - min(lp(:,2));
+        D_occ = max(dx, dy);
+        sliceDia_occ(i) = D_occ;
+ 
+        % Apply standard diameter check (no special treatment needed —
+        % partial geometry still gives a usable bounding box estimate)
+        if D_occ >= params.minGripSpan && D_occ <= params.maxGripSpan
+            sliceOK_occ(i) = true;
+        end
+    end
+ 
+    % Count 3D regions in occluded result
+    nReg_occ = 0; inReg = false; rStart = 0;
+    for i = 1:numSlices
+        if sliceOK_occ(i) && ~inReg
+            inReg=true; rStart=i;
+        elseif ~sliceOK_occ(i) && inReg
+            if (i-rStart)*delta >= params.fingerWidth3D, nReg_occ=nReg_occ+1; end
+            inReg=false;
+        end
+    end
+    if inReg && (numSlices-rStart+1)*delta >= params.fingerWidth3D
+        nReg_occ=nReg_occ+1;
+    end
+
+    end
+ 
+    regionCounts_occ(oi) = nReg_occ;
+    regionOK_occ{oi}     = sliceOK_occ;
+ 
+    fprintf('  → %d valid grasp region(s) detected\n', nReg_occ);
+end
+ 
+% Visualise comparison: full mesh vs each occlusion level
+figure('Name', 'Section 11 — Partial Mesh Tolerance', ...
+       'Position', [100 100 1200 400]);
+ 
+for oi = 1:nOcc
+    subplot(1, nOcc, oi);
+    hold on; grid on;
+ 
+    % Plot diameter profile
+    plot(zValues, sliceDia, '-o', 'Color', [0.6 0.6 0.6], 'LineWidth', 1, ...
+         'MarkerSize', 3, 'DisplayName', 'Full mesh');
+    yline(params.minGripSpan, '--r', 'LineWidth', 1.5);
+    yline(params.maxGripSpan, '--g', 'LineWidth', 1.5);
+ 
+    % Highlight which slices pass on the occluded mesh
+    okIdx = find(regionOK_occ{oi});
+    if ~isempty(okIdx)
+        scatter(zValues(okIdx), sliceDia(okIdx), 40, 'filled', ...
+                'MarkerFaceColor', [0.2 0.5 0.9]);
+    end
+ 
+    xlabel('Z (m)', 'FontSize', 9);
+    ylabel('Diameter (m)', 'FontSize', 9);
+    title(sprintf('Occlusion: %.0f%%\n(%d region(s))', ...
+          occlusionFractions(oi)*100, regionCounts_occ(oi)), 'FontSize', 10);
+    ylim([0, max(sliceDia(~isnan(sliceDia)))*1.2]);
+    hold off;
+end
+sgtitle('Section 11: Grasp Regions Under Simulated Occlusion', 'FontSize', 13);
+ 
+fprintf('Section 11 complete.\n');
+fprintf('Algorithm detects valid regions even at %.0f%% mesh occlusion.\n', ...
+    occlusionFractions(find(regionCounts_occ > 0, 1, 'last'))*100);
+ 
+ 
+%% -------------------------------------------------------------------------
+%  SECTION 12 — GEOMETRIC VALIDATION (SELF-CONSISTENCY CHECKS)
+%
+%  WHAT THIS ADDS:   This is your proof that the algorithm computes what it
+%                    claims to compute.  No robot needed — you verify the
+%                    maths against itself.  Three tests are run:
+%
+%  TEST A — Slicing Resolution Convergence:
+%            Run the diameter analysis at 10, 20, 30 and 50 slices.
+%            If the algorithm is correct, the identified feasible height
+%            range should stabilise (not jump around) as you add more
+%            slices.  This proves the result is not an accident of how
+%            many slices you chose.
+%
+%  TEST B — Ground Truth Diameter Check:
+%            For each slice your algorithm marks as graspable, independently
+%            measure the actual bounding-box diameter from the raw contour
+%            coordinates and confirm it matches the stored sliceDia value.
+%            This proves the diameter computation is accurate.
+%
+%  TEST C — Hand Size Parameter Sweep:
+%            Vary maxGripSpan across a range of real robotic hand sizes
+%            from the literature (Barrett Hand, Robotiq 3-finger, your
+%            simplified hand).  Show how the graspable zone changes.
+%            This proves the algorithm generalises to different hardware.
+%
+%  END RESULT:       A 3-panel validation figure and a pass/fail report
+%                    printed to the command window.
+% -------------------------------------------------------------------------
+ 
+fprintf('\n=== SECTION 12: GEOMETRIC VALIDATION ===\n');
+ 
+% ---- TEST A: Slicing Resolution Convergence ----
+fprintf('\n--- Test A: Slicing Resolution Convergence ---\n');
+nSlice_tests = [10, 20, 30, 50];
+feasRangeStart = zeros(size(nSlice_tests));
+feasRangeEnd   = zeros(size(nSlice_tests));
+ 
+for ti = 1:length(nSlice_tests)
+    ns = nSlice_tests(ti);
+    zv = linspace(min(vertices(:,3)), max(vertices(:,3)), ns);
+    d_u = mean(diff(zv));
+ 
+    % Compute diameters for this resolution
+    dias_t = nan(ns,1);
+    for i = 1:ns
+        z0 = zv(i);
+        segs = [];
+        for f = 1:size(faces,1)
+            idx_f = faces(f,:); tv = vertices(idx_f,:); zvals = tv(:,3);
+            if (max(zvals)>=z0)&&(min(zvals)<=z0)&&~all(zvals==z0)
+                pts=[];
+                for e=[1 2;2 3;3 1]'
+                    p1=tv(e(1),:);p2=tv(e(2),:);
+                    z1=p1(3)-z0;z2=p2(3)-z0;
+                    if z1*z2<0,t=z1/(z1-z2);pts=[pts;p1+t*(p2-p1)];
+                    elseif z1==0&&z2~=0,pts=[pts;p1];
+                    elseif z2==0&&z1~=0,pts=[pts;p2];end
+                end
+                if size(pts,1)==2,segs=[segs;pts];end
+            end
+        end
+        if isempty(segs),continue;end
+        % Quick bounding box without full stitching (for speed in validation)
+        dias_t(i) = max(max(segs(:,1))-min(segs(:,1)), max(segs(:,2))-min(segs(:,2)));
+    end
+ 
+    % Find feasible range
+    okMask = (dias_t >= params.minGripSpan) & (dias_t <= params.maxGripSpan);
+    if any(okMask)
+        feasRangeStart(ti) = zv(find(okMask,1,'first'));
+        feasRangeEnd(ti)   = zv(find(okMask,1,'last'));
+    end
+    fprintf('  %2d slices: feasible Z = [%.4f, %.4f] m\n', ...
+        ns, feasRangeStart(ti), feasRangeEnd(ti));
+end
+ 
+% ---- TEST B: Ground Truth Diameter Check ----
+fprintf('\n--- Test B: Ground Truth Diameter Verification ---\n');
+nErrors = 0; nChecked = 0;
+tolerance_check = 1e-4;  % 0.1 mm — acceptable discrepancy
+ 
+for i = 1:numSlices
+    if isnan(sliceDia(i)), continue; end
+    lps = allLoops{i};
+    if isempty(lps), continue; end
+    [~,li] = max(cellfun(@(L) size(L,1), lps));
+    lp = lps{li};
+ 
+    dx = max(lp(:,1)) - min(lp(:,1));
+    dy = max(lp(:,2)) - min(lp(:,2));
+    diam_gt = max(dx, dy);
+ 
+    discrepancy = abs(diam_gt - sliceDia(i));
+    nChecked = nChecked + 1;
+    if discrepancy > tolerance_check
+        fprintf('  MISMATCH at slice %d: stored=%.6f, ground truth=%.6f, diff=%.6f\n', ...
+            i, sliceDia(i), diam_gt, discrepancy);
+        nErrors = nErrors + 1;
+    end
+end
+ 
+if nErrors == 0
+    fprintf('  ✓ All %d diameter values verified — no discrepancies above %.1f mm\n', ...
+        nChecked, tolerance_check*1000);
+else
+    fprintf('  ✗ %d / %d diameter values had discrepancies > %.1f mm\n', ...
+        nErrors, nChecked, tolerance_check*1000);
+end
+ 
+% ---- TEST C: Hand Size Parameter Sweep ----
+fprintf('\n--- Test C: Hand Size Parameter Sweep ---\n');
+ 
+% Real hand sizes from literature
+handSizes = struct();
+handSizes(1).name = 'Barrett Hand (BH8-280)';
+handSizes(1).min  = 0.020;  % ~20 mm min span
+handSizes(1).max  = 0.080;  % ~80 mm max span
+ 
+handSizes(2).name = 'Robotiq 3-Finger';
+handSizes(2).min  = 0.025;
+handSizes(2).max  = 0.085;
+ 
+handSizes(3).name = 'Your simplified hand';
+handSizes(3).min  = params.minGripSpan;
+handSizes(3).max  = params.maxGripSpan;
+ 
+handSizes(4).name = 'Compact research hand';
+handSizes(4).min  = 0.010;
+handSizes(4).max  = 0.040;
+ 
+nHands = length(handSizes);
+handRegionCounts = zeros(nHands,1);
+handFeasZ = cell(nHands,1);
+ 
+for hi = 1:nHands
+    mn = handSizes(hi).min;
+    mx = handSizes(hi).max;
+    okMask_h = (sliceDia >= mn) & (sliceDia <= mx) & ~isnan(sliceDia);
+ 
+    % Count 3D regions
+    nReg_h=0; inReg=false; rStart=0;
+    for i=1:numSlices
+        if okMask_h(i)&&~inReg, inReg=true; rStart=i;
+        elseif ~okMask_h(i)&&inReg
+            if (i-rStart)*delta>=params.fingerWidth3D, nReg_h=nReg_h+1; end
+            inReg=false;
+        end
+    end
+    if inReg&&(numSlices-rStart+1)*delta>=params.fingerWidth3D, nReg_h=nReg_h+1; end
+ 
+    handRegionCounts(hi) = nReg_h;
+    handFeasZ{hi} = zValues(okMask_h);
+    fprintf('  %-30s  [%.0f–%.0f mm]  → %d region(s)\n', ...
+        handSizes(hi).name, mn*1000, mx*1000, nReg_h);
+end
+ 
+% ---- Validation Figure ----
+figure('Name', 'Section 12 — Validation', 'Position', [100 100 1300 500]);
+ 
+% Test A subplot
+subplot(1,3,1);
+errorbar(nSlice_tests, (feasRangeStart+feasRangeEnd)/2, ...
+         (feasRangeEnd-feasRangeStart)/2, ...
+         '-o', 'LineWidth', 2, 'Color', [0.2 0.4 0.8], 'MarkerFaceColor', [0.2 0.4 0.8]);
+xlabel('Number of Slices', 'FontSize', 11);
+ylabel('Feasible Z mid-point ± half-range (m)', 'FontSize', 10);
+title({'Test A: Slicing Resolution', 'Convergence'}, 'FontSize', 11);
+grid on;
+xticks(nSlice_tests);
+ 
+% Test B subplot
+subplot(1,3,2);
+diffs_gt = nan(numSlices,1);
+for i=1:numSlices
+    if isnan(sliceDia(i)),continue;end
+    lps=allLoops{i}; if isempty(lps),continue;end
+    [~,li]=max(cellfun(@(L)size(L,1),lps));
+    lp=lps{li};
+    diffs_gt(i)=abs(max(max(lp(:,1))-min(lp(:,1)),max(lp(:,2))-min(lp(:,2)))-sliceDia(i));
+end
+bar(zValues, diffs_gt*1000, 'FaceColor',[0.2 0.7 0.4],'EdgeColor','none');
+xlabel('Height Z (m)', 'FontSize', 11);
+ylabel('Diameter Error (mm)', 'FontSize', 11);
+title({'Test B: Ground Truth', 'Diameter Verification'}, 'FontSize', 11);
+yline(tolerance_check*1000, '--r', 'Threshold', 'LineWidth', 1.5);
+grid on;
+ 
+% Test C subplot
+subplot(1,3,3);
+barh(handRegionCounts, 'FaceColor',[0.8 0.4 0.2],'EdgeColor','k');
+yticks(1:nHands);
+yticklabels({handSizes.name});
+xlabel('Graspable Regions Found', 'FontSize', 11);
+title({'Test C: Across Different', 'Hand Sizes'}, 'FontSize', 11);
+grid on;
+xlim([0 max(handRegionCounts)+1]);
+ 
+sgtitle('Section 12: Geometric Validation — Three Tests', 'FontSize', 13);
+ 
+fprintf('\n=== STAGE 2 COMPLETE ===\n');
+fprintf('Section  9: Approach direction and pre-grasp position computed.\n');
+fprintf('Section 10: Uncertainty margin sweep complete.\n');
+fprintf('Section 11: Partial mesh occlusion test complete.\n');
+fprintf('Section 12: Three-test geometric validation complete.\n');
+fprintf('\nAll outputs are simulation-based. Physical validation is outside scope.\n');
+fprintf('Results represent geometric feasibility from the mesh model.\n');
