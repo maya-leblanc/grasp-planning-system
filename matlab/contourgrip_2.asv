@@ -17,8 +17,8 @@
 
 
 
-cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'orange.stl');
-cfg.fruitName     = 'orange';           % used in CSV output
+cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'mug.stl');
+cfg.fruitName     = 'mug';           % used in CSV output
 cfg.gripperName   = 'simplified';    % used in CSV output
 cfg.numSlices     = 20;
 cfg.meshHmax      = 2;               % finer mesh = smaller value
