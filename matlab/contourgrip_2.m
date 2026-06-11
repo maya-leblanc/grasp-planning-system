@@ -5,43 +5,30 @@
 % and Manufacturing Automation Laboratory (RMAL), McMaster University
 % Type: Grasp Planning Engineering Computing Challenge
 
-%% =========================================================================
-%  GRASP PLANNER — Refactored & Modular
-%  Sections 1–12 condensed: mesh loading, multi-height slicing, grasp
-%  analysis, approach direction, uncertainty/occlusion tests, validation,
-%  and CSV export for PyBullet.
-%  Requires: mug.stl  (swap filename for other fruits/objects)
-% =========================================================================
-
 %% === CONFIG — Edit these before running ===================================
 
-
-
-cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'orange.stl');
-cfg.fruitName     = 'orange';           % used in CSV output
+cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'strawberry.stl');
+cfg.fruitName     = 'strawberry';           % used in CSV output
 cfg.gripperName   = 'simplified';    % used in CSV output
-cfg.numSlices     = 20;
-cfg.meshHmax      = 2;               % finer mesh = smaller value
+cfg.numSlices     = 50;
+cfg.meshHmax      = 5;               % finer mesh = smaller value
+
+% meshHmax = 2, quality = very fine, speed = 40 mins
+% meshHmax = 10, quality = medium, speed = ~1 min
+% Hmax = 5 is a balance between speed and accuracy
 
 % Robot hand parameters (meters)
-cfg.minGripSpan   = 0.005;
-cfg.maxGripSpan   = 0.015;
-cfg.fingerWidth2D = 0.003;
-cfg.fingerWidth3D = 0.010;
+cfg.minGripSpan   = 0.040;   % 40mm
+cfg.maxGripSpan   = 0.090;   % 90mm
+cfg.fingerWidth2D = 0.010;
+cfg.fingerWidth3D = 0.020;
 
 % Output CSV path
 cfg.csvFile = 'grasp_results.csv';
 
 %% === SECTION 1: Load Mesh =================================================
-
-model = createpde();
-importGeometry(model, cfg.stlFile);
-meshData  = generateMesh(model, 'Hmax', cfg.meshHmax);
-vertices  = meshData.Nodes';    % Nx3
-faces     = meshData.Elements'; % Mx3 (or Mx4 for tets — handled below)
-
-% Keep only triangular faces (first 3 columns)
-faces = faces(:, 1:3);
+% Read STL directly — bypass PDE mesh
+[vertices, faces] = stlread_direct(cfg.stlFile);
 
 % Unit conversion: mm → m if needed
 if max(abs(vertices(:))) > 10
@@ -66,6 +53,17 @@ allLoops = cell(cfg.numSlices, 1);
 for i = 1:cfg.numSlices
     segments       = sliceMesh(vertices, faces, zValues(i));
     allLoops{i}    = stitchSegments(segments);
+end
+
+% for temporary diagnosis
+% Print diameter at each slice to see what's happening
+for i = 1:cfg.numSlices
+    if ~isempty(allLoops{i})
+        [~,li] = max(cellfun(@(L) size(L,1), allLoops{i}));
+        lp = allLoops{i}{li};
+        D = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
+        fprintf('Slice %2d  Z=%.4f  D=%.1fmm\n', i, zValues(i), D*1000);
+    end
 end
 
 % Visualise all slices
@@ -189,6 +187,29 @@ fprintf('\n=== ALL SECTIONS COMPLETE ===\n');
 % =========================================================================
 
 % -------------------------------------------------------------------------
+function [vertices, faces] = stlread_direct(filename)
+% Read binary or ASCII STL directly without PDE toolbox
+    fid = fopen(filename, 'rb');
+    fread(fid, 80, 'uint8');        % header
+    nTri = fread(fid, 1, 'uint32'); % number of triangles
+    vertices = zeros(nTri*3, 3);
+    faces    = zeros(nTri, 3);
+    for i = 1:nTri
+        fread(fid, 3, 'float32');   % normal vector (skip)
+        v1 = fread(fid, 3, 'float32')';
+        v2 = fread(fid, 3, 'float32')';
+        v3 = fread(fid, 3, 'float32')';
+        fread(fid, 1, 'uint16');    % attribute byte count
+        idx = (i-1)*3 + 1;
+        vertices(idx,:)   = v1;
+        vertices(idx+1,:) = v2;
+        vertices(idx+2,:) = v3;
+        faces(i,:) = [idx, idx+1, idx+2];
+    end
+    fclose(fid);
+end
+
+% -------------------------------------------------------------------------
 function segments = sliceMesh(vertices, faces, z0)
 % Intersect triangular mesh with horizontal plane at height z0.
 % Returns Nx6 array of segment endpoint pairs (each row = [pt1, pt2]).
@@ -243,7 +264,6 @@ end
 
 % -------------------------------------------------------------------------
 function [sliceDia, sliceOK, fingerSlots] = analyzeGrasp(allLoops, zValues, delta, cfg)
-% Per-slice diameter check + 3D finger-slot accumulation.
     n        = numel(zValues);
     sliceDia = nan(n,1);
     sliceOK  = false(n,1);
@@ -252,7 +272,22 @@ function [sliceDia, sliceOK, fingerSlots] = analyzeGrasp(allLoops, zValues, delt
         if isempty(allLoops{i}), continue; end
         [~,li] = max(cellfun(@(L) size(L,1), allLoops{i}));
         lp     = allLoops{i}{li};
-        D      = max(max(lp(:,1))-min(lp(:,1)),  max(lp(:,2))-min(lp(:,2)));
+        
+        % Robust diameter using convex hull
+        try
+            k = convhull(lp(:,1), lp(:,2));
+            hull_pts = lp(k, 1:2);
+            D = 0;
+            for p1 = 1:size(hull_pts,1)
+                for p2 = p1+1:size(hull_pts,1)
+                    d = norm(hull_pts(p1,:) - hull_pts(p2,:));
+                    if d > D, D = d; end
+                end
+            end
+        catch
+            D = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
+        end
+
         sliceDia(i) = D;
         sliceOK(i)  = (D >= cfg.minGripSpan) && (D <= cfg.maxGripSpan);
     end
@@ -449,7 +484,19 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta)
         lps=allLoops{i}; if isempty(lps), continue; end
         [~,li]=max(cellfun(@(L)size(L,1),lps));
         lp=lps{li};
-        D_gt=max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
+        try
+            k = convhull(lp(:,1), lp(:,2));
+            hull_pts = lp(k, 1:2);
+            D_gt = 0;
+            for pp1 = 1:size(hull_pts,1)
+                for pp2 = pp1+1:size(hull_pts,1)
+                    d = norm(hull_pts(pp1,:) - hull_pts(pp2,:));
+                    if d > D_gt, D_gt = d; end
+                end
+            end
+        catch
+            D_gt = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
+        end
         nChk=nChk+1;
         if abs(D_gt-sliceDia(i))>tol_chk, nErr=nErr+1; end
     end
