@@ -7,8 +7,8 @@
 
 %% === CONFIG — Edit these before running ===================================
 
-cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'strawberry.stl');
-cfg.fruitName     = 'strawberry';           % used in CSV output
+cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'apple.stl');
+cfg.fruitName     = 'apple';           % used in CSV output
 cfg.gripperName   = 'simplified';    % used in CSV output
 cfg.numSlices     = 50;
 cfg.meshHmax      = 5;               % finer mesh = smaller value
@@ -176,7 +176,30 @@ sgtitle('Section 11: Grasp Under Occlusion');
 
 runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta);
 
-%% === CSV EXPORT for PyBullet ==============================================
+%% === SECTION 8: Gripper Parameter Sweep ==================================
+
+% Based on first round of results (orange (86mm) + peach (79mm) strong grasps with
+% 40-90mm gripper, apple (93 mm) + pear (96mm) too wide with only weak grasps at narrow
+% ends, and strawberry (46 mm) too small and gripper cant reach), the sweep
+% will answer: "what is the optimal gripper span for each fruit?"
+
+[optMin, optMax, sweepTable] = gripperSpanSweep(sliceDia, zValues, delta, cfg);
+
+% Plot sweep results
+figure('Name', 'Gripper Span Sweep');
+imagesc(sweepTable.maxSpans*1000, sweepTable.minSpans*1000, sweepTable.regionCounts);
+colorbar; colormap(jet);
+xlabel('Max Grip Span (mm)');
+ylabel('Min Grip Span (mm)');
+title(sprintf('Grasp Regions vs Gripper Span — %s', cfg.fruitName));
+hold on;
+plot(optMax*1000, optMin*1000, 'w*', 'MarkerSize', 15, 'LineWidth', 2);
+hold off;
+
+fprintf('\nOptimal gripper for %s: min=%.1fmm  max=%.1fmm\n', ...
+    cfg.fruitName, optMin*1000, optMax*1000);
+
+%% === CSV EXPORT for GAZEBO ==============================================
 
 exportGraspCSV(S9, cfg);
 
@@ -638,4 +661,83 @@ function printGraspResults(fingerSlots, zValues, delta, cfg)
     else,         fprintf('✓   WEAK GRASP (1 finger)\n');
     end
     fprintf('\n');
+end
+% -------------------------------------------------------------------------
+function [optMin, optMax, sweepTable] = gripperSpanSweep(sliceDia, zValues, delta, cfg)
+% Sweep gripper min/max span and find optimal parameters per fruit.
+
+    % Define sweep ranges
+    minSpans = 0.010:0.005:0.060;   % 10mm to 60mm
+    maxSpans = 0.040:0.005:0.120;   % 40mm to 120mm
+
+    nMin = numel(minSpans);
+    nMax = numel(maxSpans);
+    n    = numel(zValues);
+
+    regionCounts = zeros(nMin, nMax);
+    regionHeights = zeros(nMin, nMax);
+
+    for mi = 1:nMin
+        for mxi = 1:nMax
+            mnS = minSpans(mi);
+            mxS = maxSpans(mxi);
+
+            % Skip invalid combinations
+            if mnS >= mxS, continue; end
+            % Skip if span range is too narrow to be useful
+            if (mxS - mnS) < 0.020, continue; end
+
+            ok = (sliceDia >= mnS) & (sliceDia <= mxS) & ~isnan(sliceDia);
+
+            nReg=0; inReg=false; rStart=0; maxH=0;
+            for i=1:n
+                if ok(i)&&~inReg, inReg=true; rStart=i;
+                elseif ~ok(i)&&inReg
+                    h=(i-rStart)*delta;
+                    if h>=cfg.fingerWidth3D
+                        nReg=nReg+1;
+                        if h>maxH, maxH=h; end
+                    end
+                    inReg=false;
+                end
+            end
+            if inReg
+                h=(n-rStart+1)*delta;
+                if h>=cfg.fingerWidth3D
+                    nReg=nReg+1;
+                    if h>maxH, maxH=h; end
+                end
+            end
+
+            regionCounts(mi,mxi)  = nReg;
+            regionHeights(mi,mxi) = maxH;
+        end
+    end
+
+    % Find optimal: most regions, then narrowest span (most specific gripper)
+    [maxReg, ~] = max(regionCounts(:));
+    candidates  = find(regionCounts == maxReg);
+    % Among candidates, find narrowest span
+    spanWidths = zeros(size(candidates));
+    for ci = 1:numel(candidates)
+        [mi, mxi] = ind2sub([nMin, nMax], candidates(ci));
+        spanWidths(ci) = maxSpans(mxi) - minSpans(mi);
+    end
+    [~, bestC] = min(spanWidths);
+    bestIdx    = candidates(bestC);
+    [bestMi, bestMxi] = ind2sub([nMin, nMax], bestIdx);
+
+    optMin = minSpans(bestMi);
+    optMax = maxSpans(bestMxi);
+
+    sweepTable.minSpans     = minSpans;
+    sweepTable.maxSpans     = maxSpans;
+    sweepTable.regionCounts = regionCounts;
+    sweepTable.regionHeights = regionHeights;
+
+    % Print summary
+    fprintf('\n=== GRIPPER SPAN SWEEP: %s ===\n', cfg.fruitName);
+    fprintf('Best region count: %d\n', maxReg);
+    fprintf('Optimal span: [%.1f, %.1f] mm\n', optMin*1000, optMax*1000);
+    fprintf('Grasp height at optimal: %.1f mm\n', regionHeights(bestMi,bestMxi)*1000);
 end
