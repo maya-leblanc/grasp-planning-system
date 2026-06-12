@@ -1,14 +1,33 @@
+%% Introduction
 % Authour: Maya LeBlanc
 % Affiliation: McMaster University
 % Start Date: August 12 2025
 % Referal: Dr. Gary Bone, Department of Mechanical Engineering, Robotics
 % and Manufacturing Automation Laboratory (RMAL), McMaster University
-% Type: Grasp Planning Engineering Computing Challenge
+% Type: Grasp Planning Robotics Research
 
-%% === CONFIG — Edit these before running ===================================
+%% Configuration/Input; edit these before running
 
 cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'apple.stl');
+% performs a series of operations to construct the full path to a file.
+
+% mfilename('fullpath') is a function that returns the full path of current
+% m-file executing the code without the .m extension
+% fileparts(...) is a function that splits a full path into three
+% components: path, filename, and extension.
+% fileparts(mfilename('fullpath')) returns only the directory containing
+% the current script
+% alltogether this creates an absolute path pointing to apple.stl located
+% in the stl folder, one level above the folder of the current script. 
+
 cfg.fruitName     = 'apple';           % used in CSV output
+
+% defining a structure like cfg every time is necessary because MATLAB does
+% not retain local variables automatically across runs. it ensures your
+% structure is initialized, avoiding undefined variable errors. this
+% behaviour is independednt of upcoming csv values, which only outputs
+% current in-memory values. 
+
 cfg.gripperName   = 'simplified';    % used in CSV output
 cfg.numSlices     = 50;
 cfg.meshHmax      = 5;               % finer mesh = smaller value
@@ -26,9 +45,22 @@ cfg.fingerWidth3D = 0.020;
 % Output CSV path
 cfg.csvFile = 'grasp_results.csv';
 
-%% === SECTION 1: Load Mesh =================================================
+%% Section 1: Load mesh
+
+% read a 3D model stored in an STL file and extract its geometric data
+
 % Read STL directly — bypass PDE mesh
 [vertices, faces] = stlread_direct(cfg.stlFile);
+% stlread_direct is a function (often a custom or third-party function)
+% designed to read STL files directly, returning the raw verticies and
+% faces of the 3D mesh. 
+
+% vertices: an Nx3 matrix storing the coordinates of each vertex in 3D
+% space. each row represents a single vertex with its x y z coordinates.
+
+% faces: an Mx3 or MxN matrix storing the indices of vertices that from
+% each triangular face of the mesh. each row contains indices refeering to
+% rows in the vertices matrix. 
 
 % Unit conversion: mm → m if needed
 if max(abs(vertices(:))) > 10
@@ -36,11 +68,16 @@ if max(abs(vertices(:))) > 10
     vertices = vertices / 1000;
 end
 
+% once you have vertices and faces, you can visualize or process the 3D
+% model.
+
 fprintf('Mesh loaded: %d vertices, %d triangles\n', size(vertices,1), size(faces,1));
 fprintf('Bounds: X[%.4f %.4f]  Y[%.4f %.4f]  Z[%.4f %.4f] m\n', ...
     min(vertices(:,1)), max(vertices(:,1)), ...
     min(vertices(:,2)), max(vertices(:,2)), ...
     min(vertices(:,3)), max(vertices(:,3)));
+
+% patch uses the vertices and faces to display a 3D surface of the object.
 
 %% === SECTION 2: Multi-Height Slicing (single canonical version) =========
 
