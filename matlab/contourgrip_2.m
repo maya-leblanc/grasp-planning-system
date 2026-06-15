@@ -36,6 +36,10 @@ cfg.meshHmax      = 5;               % finer mesh = smaller value
 % meshHmax = 10, quality = medium, speed = ~1 min
 % Hmax = 5 is a balance between speed and accuracy
 
+cfg.stlUnits = 'mm';  
+
+% set to 'mm' or 'm' based on how the STL was exported
+
 % Robot hand parameters (meters)
 cfg.minGripSpan   = 0.040;   % 40mm
 cfg.maxGripSpan   = 0.090;   % 90mm
@@ -63,9 +67,16 @@ cfg.csvFile = 'grasp_results.csv';
 % rows in the vertices matrix. 
 
 % Unit conversion: mm → m if needed
-if max(abs(vertices(:))) > 10
-    fprintf('Converting mm → m\n');
-    vertices = vertices / 1000;
+
+% Unit conversion
+switch cfg.stlUnits
+    case 'mm'
+        fprintf('Converting mm → m\n');
+        vertices = vertices / 1000;
+    case 'm'
+        % already in meters, no conversion needed
+    otherwise
+        error('cfg.stlUnits must be ''mm'' or ''m''');
 end
 
 % once you have vertices and faces, you can visualize or process the 3D
@@ -565,55 +576,6 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta)
     else
         fprintf('  ✗ %d/%d values had discrepancies > %.1f mm\n',nErr,nChk,tol_chk*1000);
     end
-
-    % --- Test C: Hand size sweep ---
-    fprintf('\n--- Test C: Hand Size Sweep ---\n');
-    handSizes(1).name='Barrett Hand';        handSizes(1).min=0.020; handSizes(1).max=0.080;
-    handSizes(2).name='Robotiq 3-Finger';    handSizes(2).min=0.025; handSizes(2).max=0.085;
-    handSizes(3).name='Your simplified hand';handSizes(3).min=cfg.minGripSpan; handSizes(3).max=cfg.maxGripSpan;
-    handSizes(4).name='Compact research';    handSizes(4).min=0.010; handSizes(4).max=0.040;
-    nH=numel(handSizes);
-    handRC=zeros(nH,1);
-    for hi=1:nH
-        ok=(sliceDia>=handSizes(hi).min)&(sliceDia<=handSizes(hi).max)&~isnan(sliceDia);
-        nReg=0; inReg=false; rStart=0;
-        for i=1:n
-            if ok(i)&&~inReg, inReg=true; rStart=i;
-            elseif ~ok(i)&&inReg
-                if (i-rStart)*delta>=cfg.fingerWidth3D, nReg=nReg+1; end
-                inReg=false;
-            end
-        end
-        if inReg&&(n-rStart+1)*delta>=cfg.fingerWidth3D, nReg=nReg+1; end
-        handRC(hi)=nReg;
-        fprintf('  %-28s [%.0f–%.0f mm] → %d region(s)\n', ...
-            handSizes(hi).name, handSizes(hi).min*1000, handSizes(hi).max*1000, nReg);
-    end
-
-    % Validation figure
-    figure('Name','Validation','Position',[100 100 1300 500]);
-    subplot(1,3,1);
-    errorbar(nSlice_tests,(feasStart+feasEnd)/2,(feasEnd-feasStart)/2,'-o','LineWidth',2);
-    xlabel('Num Slices'); ylabel('Feasible Z midpoint (m)'); title('Test A: Convergence'); grid on; xticks(nSlice_tests);
-
-    subplot(1,3,2);
-    diffs=nan(n,1);
-    for i=1:n
-        if isnan(sliceDia(i)),continue;end
-        lps=allLoops{i}; if isempty(lps),continue;end
-        [~,li]=max(cellfun(@(L)size(L,1),lps)); lp=lps{li};
-        diffs(i)=abs(max(max(lp(:,1))-min(lp(:,1)),max(lp(:,2))-min(lp(:,2)))-sliceDia(i));
-    end
-    bar(zValues,diffs*1000,'FaceColor',[0.2 0.7 0.4],'EdgeColor','none');
-    yline(tol_chk*1000,'--r','Threshold','LineWidth',1.5);
-    xlabel('Z (m)'); ylabel('Error (mm)'); title('Test B: Diameter Accuracy'); grid on;
-
-    subplot(1,3,3);
-    barh(handRC,'FaceColor',[0.8 0.4 0.2],'EdgeColor','k');
-    yticks(1:nH); yticklabels({handSizes.name});
-    xlabel('Graspable Regions'); title('Test C: Hand Size Sweep'); grid on; xlim([0 max(handRC)+1]);
-    sgtitle('Section 12: Geometric Validation');
-end
 
 % -------------------------------------------------------------------------
 function exportGraspCSV(S9, cfg)
