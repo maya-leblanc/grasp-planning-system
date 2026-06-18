@@ -124,17 +124,15 @@ delta    = mean(diff(zValues));
 % the actual cross-sectional shape of the fruit at that height.
 
 allLoops = cell(cfg.numSlices, 1); % sets up an empty container with one slot
-% per slice = cell(one slice, has 1 slot available for that slice)
+% per slice = cell(one slice, has 1 slot for
 % a cell array in matlab is like a list that can hold different-shaped
 % things in each slot. very useful here because each slide might produce a
 % differnt number of points/loops)
 % if numSlices = 50, you get 50 empty slots ready to be filled in
 
-for i = 1:cfg.numSlices % loop that runs once per slice, using i to step 
-    % through every height in zValues
-    segments = sliceMesh(vertices, faces, zValues(i)); 
-    % 
-    allLoops{i} = stitchSegments(segments);
+for i = 1:cfg.numSlices %
+    segments       = sliceMesh(vertices, faces, zValues(i));
+    allLoops{i}    = stitchSegments(segments);
 end
 
 % for temporary diagnosis
