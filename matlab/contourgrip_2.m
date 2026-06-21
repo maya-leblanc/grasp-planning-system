@@ -133,19 +133,21 @@ allLoops = cell(cfg.numSlices, 1); % sets up an empty container with one slot
 for i = 1:cfg.numSlices % loop that runs once per slice, using i to step 
     % through every height in zValues
     segments = sliceMesh(vertices, faces, zValues(i)); 
-    % 
+    % calls the sliceMesh function with 3 inputs: vertices = the Nx3 matrix 
+    % of all the 3D points in the mesh, faces = the Mx3 matrix defining
+    % which vertices form each triangle, and zValues(i) = the height of the
+    % current slicing plane (a single number for a slice # of a fruit type)
+    
+    % segments = Kx6 matrix where each row is one line segment [x1 y1 z1 x2
+    % y2 x2], the two endpoints of where the plane cut through one
+    % triangle. K depends on how many triangles the plane intersects at
+    % that height. 
     allLoops{i} = stitchSegments(segments);
-end
-
-% for temporary diagnosis
-% Print diameter at each slice to see what's happening
-for i = 1:cfg.numSlices
-    if ~isempty(allLoops{i})
-        [~,li] = max(cellfun(@(L) size(L,1), allLoops{i}));
-        lp = allLoops{i}{li};
-        D = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
-        fprintf('Slice %2d  Z=%.4f  D=%.1fmm\n', i, zValues(i), D*1000);
-    end
+    % returns a cell array of loops, where each loop is its own px3 matrix
+    % of ordered 3d points forming one closed contour. stored in allLops{i}
+    % using curly braces because allLoops is a cell array (needed since
+    % each slice can have a different number of loops with different
+    % numbers of points).
 end
 
 % Visualise all slices
@@ -161,9 +163,29 @@ end
 xlabel('X'); ylabel('Y'); zlabel('Z');
 title('Stacked Cross-Sections'); view(3);
 
-%% === SECTION 3: Grasp Feasibility Analysis ==============================
+%% Section 3: Grasp Feasibility Analysis
 
+% Pass 1 — global diameter to find candidate finger slots
 [sliceDia, sliceOK, fingerSlots] = analyzeGrasp(allLoops, zValues, delta, cfg);
+
+% Pass 2 — if slots were found, compute approach direction then re-evaluate
+% diameter specifically along the gripper's closing axis
+if ~isempty(fingerSlots)
+    % get approach direction from pass 1 slots
+    S9_temp = computeApproachDirection(allLoops, zValues, fingerSlots, delta, cfg);
+    
+    % closing axis is perpendicular to approach direction in XY plane
+    % if gripper approaches from direction [dx dy], it closes along [-dy dx]
+    closingAxis = [-S9_temp.approachDir(2), S9_temp.approachDir(1)];
+    
+    % re-run analyzeGrasp using oriented diameter along closing axis
+    [sliceDia, sliceOK, fingerSlots] = analyzeGrasp(allLoops, zValues, delta, cfg, closingAxis);
+    
+    fprintf('Oriented diameter pass complete — closing axis: [%.3f %.3f]\n', closingAxis);
+else
+    % no slots found in pass 1, skip pass 2
+    fprintf('No regions in pass 1 — skipping oriented diameter pass.\n');
+end
 
 % Plot diameter profile
 figure('Name', 'Grasp Feasibility');
@@ -177,7 +199,7 @@ title('Graspable Regions (red)');
 % Print results
 printGraspResults(fingerSlots, zValues, delta, cfg);
 
-%% === SECTION 4: Gripper Approach Direction ================================
+%% Section 4: Gripper Approach Direction
 
 if isempty(fingerSlots)
     fprintf('No graspable regions — skipping approach direction.\n');
@@ -207,7 +229,7 @@ else
         S9.approachDir, S9.preGraspPos);
 end
 
-%% === SECTION 5: Uncertainty Margin Analysis ==============================
+%% Section 5: Uncertainty Margin Analysis
 
 delta_u_values = [0, 0.0005, 0.001, 0.0015, 0.002, 0.003];
 [slicesOK_per_delta, regionCount] = uncertaintyAnalysis( ...
@@ -227,7 +249,7 @@ bar(delta_u_values*1000, regionCount, 'FaceColor',[0.2 0.6 1],'EdgeColor','k');
 xlabel('\delta_u (mm)'); ylabel('Valid Grasp Regions');
 title('Region Count vs. Uncertainty'); grid on;
 
-%% === SECTION 6: Partial Mesh / Simulated Occlusion =======================
+%% Section 6: Partial Mesh / Simulated Occlusion
 
 occlusionFractions = [0, 0.10, 0.20, 0.30];
 [regionCounts_occ, regionOK_occ] = occlusionTest( ...
@@ -368,51 +390,100 @@ function loops = stitchSegments(segments)
 end
 
 % -------------------------------------------------------------------------
-function [sliceDia, sliceOK, fingerSlots] = analyzeGrasp(allLoops, zValues, delta, cfg)
-    n        = numel(zValues);
-    sliceDia = nan(n,1);
-    sliceOK  = false(n,1);
+function [sliceDia, sliceOK, fingerSlots] = analyzeGrasp(allLoops, zValues, delta, cfg, closingAxis)
+% analyzeGrasp — measures fruit diameter at each slice height and identifies
+% vertical regions where a gripper can fit (finger slots).
+%
+% If closingAxis is provided (Pass 2), diameter is measured specifically
+% along that axis — the direction the gripper fingers actually close along.
+% If closingAxis is not provided (Pass 1), the global maximum diameter is
+% used instead (maximum distance between any two hull points, any direction).
+
+    n        = numel(zValues);   % total number of slices (e.g. 50)
+    sliceDia = nan(n,1);         % diameter at each slice, NaN until computed
+    sliceOK  = false(n,1);       % true/false: is this slice graspable?
+
+    % check if a closing axis was passed in (pass 2) or not (pass 1)
+    useOrientedDiameter = (nargin == 5) && ~isempty(closingAxis);
 
     for i = 1:n
+        % skip empty slices (top/bottom of fruit where no contour exists)
         if isempty(allLoops{i}), continue; end
+
+        % pick the largest contour loop at this height
+        % (largest by number of points = main fruit outline)
         [~,li] = max(cellfun(@(L) size(L,1), allLoops{i}));
         lp     = allLoops{i}{li};
-        
-        % Robust diameter using convex hull
+
+        % compute diameter — two methods depending on which pass we are on
         try
-            k = convhull(lp(:,1), lp(:,2));
-            hull_pts = lp(k, 1:2);
-            D = 0;
-            for p1 = 1:size(hull_pts,1)
-                for p2 = p1+1:size(hull_pts,1)
-                    d = norm(hull_pts(p1,:) - hull_pts(p2,:));
-                    if d > D, D = d; end
+            % compute convex hull of the contour points in the XY plane
+            % convhull returns indices of the points that form the outer boundary
+            k        = convhull(lp(:,1), lp(:,2));
+            hull_pts = lp(k, 1:2);   % XY coordinates of hull points only
+
+            if useOrientedDiameter
+                % --- PASS 2: oriented diameter along gripper closing axis ---
+                % project every hull point onto the closing axis using dot product.
+                % dot product of a point P with unit vector U gives the signed
+                % distance of P along U. taking max-min of all these projections
+                % gives the width of the fruit specifically in the closing direction.
+                projections = hull_pts * closingAxis(:);
+                % hull_pts is Px2, closingAxis is [cx cy], so this is a Px1
+                % vector of scalar projections of each hull point onto the axis
+                D = max(projections) - min(projections);
+                % D is now the width of the fruit as the gripper would see it —
+                % measured in the direction the fingers actually close, not just
+                % the global widest direction
+            else
+                % --- PASS 1: global diameter (any direction) ---
+                % find the maximum pairwise distance between any two hull points.
+                % this is the true geometric diameter but direction-independent.
+                D = 0;
+                for p1 = 1:size(hull_pts,1)
+                    for p2 = p1+1:size(hull_pts,1)
+                        d = norm(hull_pts(p1,:) - hull_pts(p2,:));
+                        if d > D, D = d; end
+                    end
                 end
             end
+
         catch
+            % fallback if convhull fails (e.g. collinear points, tiny contour)
+            % use simple bounding box width as a rough approximation
             D = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
         end
 
         sliceDia(i) = D;
+        % check if this diameter fits within the gripper's operating range
         sliceOK(i)  = (D >= cfg.minGripSpan) && (D <= cfg.maxGripSpan);
     end
 
+    % group consecutive feasible slices into finger slots
+    % a finger slot is only valid if its vertical height >= fingerWidth3D
     fingerSlots = [];
-    inReg = false;  rStart = 0;
+    inReg = false;   % are we currently inside a feasible region?
+    rStart = 0;      % slice index where the current region started
+
     for i = 1:n
-        if sliceOK(i) && ~inReg,  inReg=true;  rStart=i;
+        if sliceOK(i) && ~inReg
+            % just entered a feasible region — record the start
+            inReg  = true;
+            rStart = i;
         elseif ~sliceOK(i) && inReg
+            % just left a feasible region — check if it was tall enough
             if (i-rStart)*delta >= cfg.fingerWidth3D
+                % tall enough for a finger — save as a valid slot
                 fingerSlots(end+1,:) = [rStart, i-1]; %#ok<AGROW>
             end
             inReg = false;
         end
     end
+    % handle case where a feasible region extends all the way to the last slice
     if inReg && (n-rStart+1)*delta >= cfg.fingerWidth3D
         fingerSlots(end+1,:) = [rStart, n]; %#ok<AGROW>
     end
 end
-
 % -------------------------------------------------------------------------
 function S9 = computeApproachDirection(allLoops, zValues, fingerSlots, delta, cfg)
 % Find widest angular gap in midpoint contour → approach direction.
@@ -773,4 +844,28 @@ function [optMin, optMax, sweepTable] = gripperSpanSweep(sliceDia, zValues, delt
     fprintf('Best region count: %d\n', maxReg);
     fprintf('Optimal span: [%.1f, %.1f] mm\n', optMin*1000, optMax*1000);
     fprintf('Grasp height at optimal: %.1f mm\n', regionHeights(bestMi,bestMxi)*1000);
+end
+% -------------------------------------------------------------------------
+function D = computeOrientedDiameter(hull_pts, closingAxis)
+% computeOrientedDiameter — measures the width of a convex hull
+% specifically along a given direction (the gripper's closing axis).
+%
+% hull_pts:    Px2 matrix of XY coordinates of convex hull points
+% closingAxis: 1x2 unit vector [cx cy] — the direction gripper fingers close
+%
+% Returns D: the projected width of the shape along closingAxis
+%
+% How it works:
+% Each hull point is projected onto the closing axis using a dot product.
+% The projection scalar tells you how far along the axis that point sits.
+% The width is the difference between the furthest and nearest projections.
+
+    projections = hull_pts * closingAxis(:);
+    % hull_pts is Px2 = [x1 y1; x2 y2; ...]
+    % closingAxis(:) converts [cx cy] to a column vector [cx; cy]
+    % matrix multiply: each row [xi yi] dot [cx; cy] = xi*cx + yi*cy
+    % result is a Px1 vector of scalar projections
+
+    D = max(projections) - min(projections);
+    % width = furthest projection minus nearest projection
 end
