@@ -298,7 +298,7 @@ sgtitle('Section 11: Grasp Under Occlusion');
 
 %% === SECTION 7: Geometric Validation =====================================
 
-runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta);
+runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_rigid, cfg, delta, closingAxis);
 
 %% === SECTION 8: Gripper Parameter Sweep ==================================
 
@@ -638,66 +638,130 @@ end
 % -------------------------------------------------------------------------
 function [regionCounts_occ, regionOK_occ] = occlusionTest( ...
     vertices, faces, zValues, cfg, sliceDia, delta)
+% occlusionTest — re-runs grasp feasibility analysis at four occlusion levels
+% by removing a fraction of mesh triangles from one side of the fruit,
+% simulating partial visibility caused by leaves, branches, or neighbouring fruit.
+%
+% Deformability correction (cfg.deformFactor) is applied consistently here
+% so occlusion results are comparable to the main analysis.
+%
+% INPUTS:
+%   vertices  — Nx3 matrix of mesh vertex coordinates (meters)
+%   faces     — Mx3 matrix of triangle vertex indices
+%   zValues   — 1xN slice heights in meters
+%   cfg       — config struct (minGripSpan, maxGripSpan, fingerWidth3D, deformFactor)
+%   sliceDia  — not used directly here, kept for signature consistency
+%   delta     — vertical spacing between slices in meters
+%
+% OUTPUTS:
+%   regionCounts_occ — 4x1 array of valid grasp region counts per occlusion level
+%   regionOK_occ     — 4x1 cell array of logical feasibility vectors per occlusion level
 
-    occlusionFractions = [0, 0.10, 0.20, 0.30];
-    nOcc   = numel(occlusionFractions);
-    n      = numel(zValues);
-    fCx    = (vertices(faces(:,1),1)+vertices(faces(:,2),1)+vertices(faces(:,3),1))/3;
-    occIdx = find(fCx > mean(vertices(:,1)));
+    occlusionFractions = [0, 0.10, 0.20, 0.30];  % 0%, 10%, 20%, 30% occlusion
+    nOcc = numel(occlusionFractions);
+    n    = numel(zValues);
 
-    regionCounts_occ = zeros(nOcc,1);
-    regionOK_occ     = cell(nOcc,1);
+    % identify which triangles are on the positive-X side of the fruit centroid
+    % these are the triangles that will be progressively removed to simulate occlusion
+    % fCx is the X coordinate of each triangle's centroid
+    fCx    = (vertices(faces(:,1),1) + vertices(faces(:,2),1) + vertices(faces(:,3),1)) / 3;
+    occIdx = find(fCx > mean(vertices(:,1)));  % indices of triangles on the +X side
+
+    regionCounts_occ = zeros(nOcc,1);   % store region count per occlusion level
+    regionOK_occ     = cell(nOcc,1);    % store per-slice feasibility per occlusion level
 
     for oi = 1:nOcc
-        nRem      = round(occlusionFractions(oi) * numel(occIdx));
-        keepMask  = true(size(faces,1),1);
+        % calculate how many triangles to remove at this occlusion level
+        nRem = round(occlusionFractions(oi) * numel(occIdx));
+
+        % build a logical mask — start with all triangles kept (true)
+        % then set the first nRem occluded triangles to false (removed)
+        keepMask = true(size(faces,1),1);
         keepMask(occIdx(1:nRem)) = false;
-        faces_occ = faces(keepMask,:);
+        faces_occ = faces(keepMask,:);  % reduced face list with occluded triangles removed
 
         fprintf('Occlusion %.0f%%: removed %d triangles\n', ...
             occlusionFractions(oi)*100, nRem);
 
-        % Slice occluded mesh
+        % slice the occluded mesh at every height
         allLoops_occ = cell(n,1);
         for i = 1:n
             segs = sliceMesh(vertices, faces_occ, zValues(i));
             allLoops_occ{i} = stitchSegments(segs);
         end
 
-        % Diameter check
+        % diameter check with deformability correction
+        % this mirrors the main analyzeGrasp logic so results are comparable
         sliceOK_occ = false(n,1);
         for i = 1:n
             lps = allLoops_occ{i};
             if isempty(lps), continue; end
+
+            % pick largest loop at this height
             [~,li] = max(cellfun(@(L) size(L,1), lps));
             lp = lps{li};
+
+            % skip contours with too few points to be meaningful
             if size(lp,1) < 5, continue; end
+
+            % compute raw rigid-body diameter using bounding box
             D = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
-            sliceOK_occ(i) = (D>=cfg.minGripSpan) && (D<=cfg.maxGripSpan);
+
+            % apply deformability correction — same factor as main analysis
+            % so that occlusion results reflect the same effective diameter
+            % the gripper would actually encounter on a real soft fruit
+            D_eff = D * (1 - cfg.deformFactor);
+
+            % check if effective diameter fits the gripper span
+            sliceOK_occ(i) = (D_eff >= cfg.minGripSpan) && (D_eff <= cfg.maxGripSpan);
         end
 
+        % count valid finger slots at this occlusion level
+        % same logic as analyzeGrasp: consecutive feasible slices must span
+        % at least fingerWidth3D in height to count as a valid region
         nReg=0; inReg=false; rStart=0;
-        for i=1:n
-            if sliceOK_occ(i)&&~inReg, inReg=true; rStart=i;
-            elseif ~sliceOK_occ(i)&&inReg
-                if (i-rStart)*delta>=cfg.fingerWidth3D, nReg=nReg+1; end
-                inReg=false;
+        for i = 1:n
+            if sliceOK_occ(i) && ~inReg
+                inReg  = true;
+                rStart = i;
+            elseif ~sliceOK_occ(i) && inReg
+                if (i-rStart)*delta >= cfg.fingerWidth3D
+                    nReg = nReg+1;
+                end
+                inReg = false;
             end
         end
-        if inReg&&(n-rStart+1)*delta>=cfg.fingerWidth3D, nReg=nReg+1; end
+        % handle region running all the way to the last slice
+        if inReg && (n-rStart+1)*delta >= cfg.fingerWidth3D
+            nReg = nReg+1;
+        end
 
         regionCounts_occ(oi) = nReg;
         regionOK_occ{oi}     = sliceOK_occ;
         fprintf('  → %d valid region(s)\n', nReg);
     end
 end
-
 % -------------------------------------------------------------------------
-% -------------------------------------------------------------------------
-function runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta)
+function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_rigid, cfg, delta, closingAxis)
 % Geometric validation: Test A (resolution convergence) and Test B (diameter accuracy)
+%
+% sliceDia       — effective diameter after deformability correction (used in main analysis)
+% sliceDia_rigid — raw rigid-body diameter before correction (used in Test B verification)
+% closingAxis    — 1x2 unit vector of gripper closing direction (from pass 2),
+%                  or empty [] if no valid regions were found in pass 1
+%
+% Test B compares against sliceDia_rigid because the convex hull recomputes
+% the raw geometric diameter — comparing against sliceDia would always show
+% a discrepancy equal to the deformability factor, which is expected not an error.
+% Test B also uses the same diameter method (oriented or global) as the main
+% analysis so the comparison is meaningful.
+
     fprintf('\n=== SECTION 7: VALIDATION ===\n');
     n = numel(zValues);
+
+    % check if an oriented closing axis was used in the main analysis
+    % nargin counts how many arguments were passed in — 9 means closingAxis was provided
+    useOriented = (nargin == 9) && ~isempty(closingAxis);
 
     % --- Test A: Resolution Convergence ---
     % Re-runs slicing at 10, 20, 30, and 50 slices to check whether the
@@ -728,14 +792,14 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta)
     end
 
     % --- Test B: Diameter Verification ---
-    % Re-computes diameter independently for each slice using convex hull
-    % and compares against sliceDia computed during the main analysis.
-    % Any discrepancy above tol_chk (0.1mm) is flagged as an error.
+    % Recomputes diameter independently for each slice using the same method
+    % (oriented or global) as the main analysis and compares against
+    % sliceDia_rigid. Discrepancies above 0.1mm flag an implementation error.
     fprintf('\n--- Test B: Diameter Verification ---\n');
     nErr = 0; nChk = 0; tol_chk = 1e-4;
 
     for i = 1:n
-        if isnan(sliceDia(i)), continue; end
+        if isnan(sliceDia_rigid(i)), continue; end
         lps = allLoops{i};
         if isempty(lps), continue; end
         [~,li] = max(cellfun(@(L) size(L,1), lps));
@@ -744,19 +808,29 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta)
         try
             k        = convhull(lp(:,1), lp(:,2));
             hull_pts = lp(k, 1:2);
-            D_gt = 0;
-            for pp1 = 1:size(hull_pts,1)
-                for pp2 = pp1+1:size(hull_pts,1)
-                    d = norm(hull_pts(pp1,:) - hull_pts(pp2,:));
-                    if d > D_gt, D_gt = d; end
+
+            if useOriented
+                % recompute using same closing axis as main analysis
+                % projects hull points onto closing axis, takes max-min
+                projections = hull_pts * closingAxis(:);
+                D_gt = max(projections) - min(projections);
+            else
+                % recompute using global max pairwise distance
+                D_gt = 0;
+                for pp1 = 1:size(hull_pts,1)
+                    for pp2 = pp1+1:size(hull_pts,1)
+                        d = norm(hull_pts(pp1,:) - hull_pts(pp2,:));
+                        if d > D_gt, D_gt = d; end
+                    end
                 end
             end
         catch
+            % fallback if convhull fails
             D_gt = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
         end
 
         nChk = nChk + 1;
-        if abs(D_gt - sliceDia(i)) > tol_chk
+        if abs(D_gt - sliceDia_rigid(i)) > tol_chk
             nErr = nErr + 1;
         end
     end
@@ -776,15 +850,37 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta)
     title('Test A: Resolution Convergence'); grid on; xticks(nSlice_tests);
 
     subplot(1,2,2);
+    % recompute diffs using same method as Test B above
+    % so the bar chart is consistent with what was verified numerically
     diffs = nan(n,1);
     for i = 1:n
-        if isnan(sliceDia(i)), continue; end
+        if isnan(sliceDia_rigid(i)), continue; end
         lps = allLoops{i};
         if isempty(lps), continue; end
         [~,li] = max(cellfun(@(L) size(L,1), lps));
         lp = lps{li};
-        diffs(i) = abs(max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2))) - sliceDia(i));
+
+        try
+            k        = convhull(lp(:,1), lp(:,2));
+            hull_pts = lp(k, 1:2);
+
+            if useOriented
+                % use oriented projection — same as Test B numerical check
+                projections  = hull_pts * closingAxis(:);
+                D_recomputed = max(projections) - min(projections);
+            else
+                % use global bounding box
+                D_recomputed = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
+            end
+        catch
+            D_recomputed = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
+        end
+
+        % diff between recomputed and stored rigid diameter
+        % should be near zero — any gap indicates an implementation inconsistency
+        diffs(i) = abs(D_recomputed - sliceDia_rigid(i));
     end
+
     bar(zValues, diffs*1000, 'FaceColor',[0.2 0.7 0.4], 'EdgeColor','none');
     yline(tol_chk*1000, '--r', 'Threshold', 'LineWidth', 1.5);
     xlabel('Z (m)'); ylabel('Error (mm)');
@@ -793,7 +889,6 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, cfg, delta)
     sgtitle('Section 7: Geometric Validation');
 
 end   % closes runValidation
-
 % -------------------------------------------------------------------------
 function exportGraspCSV(S9, cfg)
 % Write grasp pose to CSV for Gazebo.
