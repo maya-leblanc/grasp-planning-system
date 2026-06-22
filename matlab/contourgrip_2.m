@@ -616,8 +616,18 @@ function [slicesOK_per_delta, regionCount] = uncertaintyAnalysis( ...
         mxU  = cfg.maxGripSpan - du;
         if mnU >= mxU, continue; end
 
-        okU = (sliceDia >= mnU) & (sliceDia <= mxU) & ~isnan(sliceDia);
-        slicesOK_per_delta(ui,:) = okU';
+        
+        % also propagate uncertainty in the deformability estimate itself
+        % deformFactor has ~±20% relative uncertainty from literature values
+        % so effective diameter has additional uncertainty of D * deformFactor * 0.20
+        % this adds to the gripper span uncertainty symmetrically
+        deformUncertainty = mean(sliceDia(~isnan(sliceDia))) * cfg.deformFactor * 0.20;
+
+        % combined uncertainty: positional + deformability
+        % slices must be feasible even at worst-case combined uncertainty
+        okU = (sliceDia >= mnU + deformUncertainty) & ...
+            (sliceDia <= mxU - deformUncertainty) & ...
+            ~isnan(sliceDia);
 
         nReg=0; inReg=false; rStart=0;
         for i=1:n
@@ -634,6 +644,9 @@ function [slicesOK_per_delta, regionCount] = uncertaintyAnalysis( ...
             du*1000, mnU, mxU, nReg);
     end
 end
+
+fprintf('delta_u=%.1fmm (deform±%.1fmm) → [%.3f %.3f]m → %d region(s)\n', ...
+    du*1000, deformUncertainty*1000, mnU, mxU, nReg);
 
 % -------------------------------------------------------------------------
 function [regionCounts_occ, regionOK_occ] = occlusionTest( ...
