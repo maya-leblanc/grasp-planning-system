@@ -8,7 +8,7 @@
 
 %% Configuration/Input; edit these before running
 
-cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'peach.stl');
+cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'strawberry.stl');
 % performs a series of operations to construct the full path to a file.
 
 % mfilename('fullpath') is a function that returns the full path of current
@@ -20,7 +20,7 @@ cfg.stlFile = fullfile(fileparts(mfilename('fullpath')), '..', 'stl', 'peach.stl
 % alltogether this creates an absolute path pointing to apple.stl located
 % in the stl folder, one level above the folder of the current script. 
 
-cfg.fruitName = 'peach';           % used in CSV output
+cfg.fruitName = 'strawberry';           % used in CSV output
 
 % defining a structure like cfg every time is necessary because MATLAB does
 % not retain local variables automatically across runs. it ensures your
@@ -35,7 +35,7 @@ cfg.fruitName = 'peach';           % used in CSV output
 %   orange:     0.03  (firm skin)
 %   apple:      0.02  (firm)
 %   pear:       0.03  (firm at base where grasped)
-cfg.deformFactor = 0.07;   % change per fruit
+cfg.deformFactor = 0.12;   % change per fruit
 
 cfg.gripperName   = 'simplified';    % used in CSV output
 cfg.numSlices     = 50;
@@ -174,8 +174,6 @@ title('Stacked Cross-Sections'); view(3);
 
 %% Section 3: Grasp Feasibility Analysis
 
-%% Section 3: Grasp Feasibility Analysis
-
 % Pass 1 — global diameter to find candidate finger slots
 % captures sliceDia_rigid so we can compare rigid vs effective later
 [sliceDia, sliceOK, fingerSlots, sliceDia_rigid] = analyzeGrasp(allLoops, zValues, delta, cfg);
@@ -194,17 +192,17 @@ if ~isempty(fingerSlots)
     % also captures updated rigid diameters measured along closing axis
     [sliceDia, sliceOK, fingerSlots, sliceDia_rigid] = analyzeGrasp(allLoops, zValues, delta, cfg, closingAxis);
 
-    fprintf('Oriented diameter pass complete — closing axis: [%.3f %.3f]\n', closingAxis);
+    fprintf('Oriented diameter pass complete, closing axis: [%.3f %.3f]\n', closingAxis);
 else
     % no slots found in pass 1 — skip pass 2
     % closingAxis is undefined so set it empty for downstream safety
     closingAxis = [];
-    fprintf('No regions in pass 1 — skipping oriented diameter pass.\n');
+    fprintf('No regions in pass 1, skipping oriented diameter pass.\n');
 end
 
 % print deformability summary so you can see the correction effect
-fprintf('Deformability factor:   %.0f%%\n', cfg.deformFactor*100);
-fprintf('Max rigid diameter:     %.1fmm\n', max(sliceDia_rigid(~isnan(sliceDia_rigid)))*1000);
+fprintf('Deformability factor: %.0f%%\n', cfg.deformFactor*100);
+fprintf('Max rigid diameter: %.1fmm\n', max(sliceDia_rigid(~isnan(sliceDia_rigid)))*1000);
 fprintf('Max effective diameter: %.1fmm\n', max(sliceDia(~isnan(sliceDia)))*1000);
 
 % Plot diameter profile
@@ -222,7 +220,7 @@ printGraspResults(fingerSlots, zValues, delta, cfg);
 %% Section 4: Gripper Approach Direction
 
 if isempty(fingerSlots)
-    fprintf('No graspable regions — skipping approach direction.\n');
+    fprintf('No graspable regions, skipping approach direction.\n');
     S9 = [];
 else
     S9 = computeApproachDirection(allLoops, zValues, fingerSlots, delta, cfg);
@@ -296,11 +294,11 @@ for oi = 1:nOcc
 end
 sgtitle('Section 11: Grasp Under Occlusion');
 
-%% === SECTION 7: Geometric Validation =====================================
+%% Section 7: Geometric Validation
 
 runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_rigid, cfg, delta, closingAxis);
 
-%% === SECTION 8: Gripper Parameter Sweep ==================================
+%% Section 8: Gripper Parameter Sweep 
 
 % Based on first round of results (orange (86mm) + peach (79mm) strong grasps with
 % 40-90mm gripper, apple (93 mm) + pear (96mm) too wide with only weak grasps at narrow
@@ -325,15 +323,13 @@ hold off;
 fprintf('\nOptimal gripper for %s: min=%.1fmm  max=%.1fmm\n', ...
     cfg.fruitName, optMin*1000, optMax*1000);
 
-%% === CSV EXPORT for GAZEBO ==============================================
+%% CSV Export for Gazebo
 
 exportGraspCSV(S9, cfg);
 
-fprintf('\n=== ALL SECTIONS COMPLETE ===\n');
+fprintf('\nAll sections are complete.\n');
 
-%% =========================================================================
-%  LOCAL FUNCTIONS
-% =========================================================================
+%% Local functions
 
 % -------------------------------------------------------------------------
 function [vertices, faces] = stlread_direct(filename)
@@ -373,15 +369,15 @@ function segments = sliceMesh(vertices, faces, z0)
             z1 = p1(3)-z0;    z2 = p2(3)-z0;
             if z1*z2 < 0
                 t = z1/(z1-z2);
-                pts(end+1,:) = p1 + t*(p2-p1); %#ok<AGROW>
+                pts(end+1,:) = p1 + t*(p2-p1); 
             elseif z1==0 && z2~=0
-                pts(end+1,:) = p1; %#ok<AGROW>
+                pts(end+1,:) = p1;
             elseif z2==0 && z1~=0
-                pts(end+1,:) = p2; %#ok<AGROW>
+                pts(end+1,:) = p2;
             end
         end
         if size(pts,1) == 2
-            segments = [segments; pts]; %#ok<AGROW>
+            segments = [segments; pts]; 
         end
     end
 end
@@ -407,7 +403,7 @@ function loops = stitchSegments(segments)
             end
             if ~found, closed = true; end
         end
-        loops{end+1} = loop; %#ok<AGROW>
+        loops{end+1} = loop; 
     end
 end
 
@@ -540,7 +536,7 @@ function [sliceDia, sliceOK, fingerSlots, sliceDia_rigid] = analyzeGrasp(allLoop
             % (i-rStart)*delta converts slice count to physical height in meters
             if (i-rStart)*delta >= cfg.fingerWidth3D
                 % tall enough — save as a valid finger slot [startIdx, endIdx]
-                fingerSlots(end+1,:) = [rStart, i-1]; %#ok<AGROW>
+                fingerSlots(end+1,:) = [rStart, i-1]; 
             end
             inReg = false;
         end
@@ -549,9 +545,10 @@ function [sliceDia, sliceOK, fingerSlots, sliceDia_rigid] = analyzeGrasp(allLoop
     % handle the edge case where a feasible region runs all the way to the
     % last slice without hitting an infeasible slice to trigger the save above
     if inReg && (n-rStart+1)*delta >= cfg.fingerWidth3D
-        fingerSlots(end+1,:) = [rStart, n]; %#ok<AGROW>
+        fingerSlots(end+1,:) = [rStart, n]; 
     end
 end
+
 % -------------------------------------------------------------------------
 function S9 = computeApproachDirection(allLoops, zValues, fingerSlots, delta, cfg)
 % Find widest angular gap in midpoint contour → approach direction.
@@ -751,6 +748,7 @@ function [regionCounts_occ, regionOK_occ] = occlusionTest( ...
         fprintf('  → %d valid region(s)\n', nReg);
     end
 end
+
 % -------------------------------------------------------------------------
 function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_rigid, cfg, delta, closingAxis)
 % Geometric validation: Test A (resolution convergence) and Test B (diameter accuracy)
@@ -766,7 +764,7 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
 % Test B also uses the same diameter method (oriented or global) as the main
 % analysis so the comparison is meaningful.
 
-    fprintf('\n=== SECTION 7: VALIDATION ===\n');
+    fprintf('\nNow introducing section 7: validation\n');
     n = numel(zValues);
 
     % check if an oriented closing axis was used in the main analysis
@@ -774,7 +772,7 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
     useOriented = (nargin == 9) && ~isempty(closingAxis);
 
     % --- Test A: Resolution Convergence ---
-    fprintf('\n--- Test A: Resolution Convergence ---\n');
+    fprintf('\nBelow is Test A: Resolution Convergence\n');
     nSlice_tests = [10, 20, 30, 50];
     feasStart    = zeros(size(nSlice_tests));
     feasEnd      = zeros(size(nSlice_tests));
@@ -799,7 +797,7 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
     end
 
     % --- Test B: Diameter Verification ---
-    fprintf('\n--- Test B: Diameter Verification ---\n');
+    fprintf('\nBelopw is Test B: Diameter Verification\n');
     nErr = 0; nChk = 0; tol_chk = 1e-4;
 
     for i = 1:n
@@ -835,9 +833,9 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
     end
 
     if nErr == 0
-        fprintf('  ✓ All %d values verified — no discrepancies above %.1f mm\n', nChk, tol_chk*1000);
+        fprintf('   All %d values verified, there are no discrepancies above %.1f mm\n', nChk, tol_chk*1000);
     else
-        fprintf('  ✗ %d/%d values had discrepancies > %.1f mm\n', nErr, nChk, tol_chk*1000);
+        fprintf('   %d/%d values had discrepancies > %.1f mm\n', nErr, nChk, tol_chk*1000);
     end
 
     % --- Validation Figure ---
@@ -887,7 +885,7 @@ function exportGraspCSV(S9, cfg)
 % Columns: fruit, gripper, grasp_x, grasp_y, grasp_z,
 %          approach_dx, approach_dy, approach_dz, gap_angle_deg
     if isempty(S9)
-        fprintf('No grasp found — CSV not written.\n');
+        fprintf('No grasp found, CSV not written.\n');
         return;
     end
     fid = fopen(cfg.csvFile, 'w');
@@ -942,14 +940,14 @@ end
 
 % -------------------------------------------------------------------------
 function printGraspResults(fingerSlots, zValues, delta, cfg)
-    fprintf('\n=== POWER GRASP RESULTS ===\n');
+    fprintf('\nIntroducing power grasp results\n');
     fprintf('Hand: grip span [%.1f, %.1f] mm | finger 3D width %.1f mm\n', ...
         cfg.minGripSpan*1000, cfg.maxGripSpan*1000, cfg.fingerWidth3D*1000);
     if isempty(fingerSlots)
-        fprintf('❌ No graspable regions found.\n\n');
+        fprintf('No graspable regions found.\n\n');
         return;
     end
-    fprintf('✓ %d graspable region(s):\n\n', size(fingerSlots,1));
+    fprintf('%d graspable region(s):\n\n', size(fingerSlots,1));
     for r=1:size(fingerSlots,1)
         zs=zValues(fingerSlots(r,1)); ze=zValues(fingerSlots(r,2));
         h=ze-zs;
@@ -958,12 +956,13 @@ function printGraspResults(fingerSlots, zValues, delta, cfg)
     end
     maxH = max(fingerSlots(:,2)-fingerSlots(:,1)+1)*delta;
     nF   = floor(maxH/cfg.fingerWidth3D);
-    if nF>=3,     fprintf('✓✓✓ STRONG POWER GRASP (3+ fingers)\n');
-    elseif nF>=2, fprintf('✓✓  STABLE POWER GRASP (2 fingers)\n');
-    else,         fprintf('✓   WEAK GRASP (1 finger)\n');
+    if nF>=3,     fprintf('strong power grasp (3+ fingers)\n');
+    elseif nF>=2, fprintf('stable power grasp (2 fingers)\n');
+    else,         fprintf('weak grasp (1 finger)\n');
     end
     fprintf('\n');
 end
+
 % -------------------------------------------------------------------------
 function [optMin, optMax, sweepTable] = gripperSpanSweep(sliceDia, sliceDia_rigid, zValues, delta, cfg)
 % gripperSpanSweep — sweeps gripper min/max span combinations and finds
@@ -1066,12 +1065,13 @@ function [optMin, optMax, sweepTable] = gripperSpanSweep(sliceDia, sliceDia_rigi
     sweepTable.regionHeights = regionHeights;
 
     % print summary
-    fprintf('\n=== GRIPPER SPAN SWEEP: %s ===\n', cfg.fruitName);
+    fprintf('\nIntroducing gripper span sweep: %s\n', cfg.fruitName);
     fprintf('Deformability factor applied: %.0f%%\n', cfg.deformFactor*100);
-    fprintf('Best region count:  %d\n', maxReg);
-    fprintf('Optimal span:       [%.1f, %.1f] mm (effective diameters)\n', optMin*1000, optMax*1000);
-    fprintf('Grasp height:       %.1f mm\n', regionHeights(bestMi,bestMxi)*1000);
+    fprintf('Best region count: %d\n', maxReg);
+    fprintf('Optimal span: [%.1f, %.1f] mm (effective diameters)\n', optMin*1000, optMax*1000);
+    fprintf('Grasp height: %.1f mm\n', regionHeights(bestMi,bestMxi)*1000);
 end
+
 % -------------------------------------------------------------------------
 function D = computeOrientedDiameter(hull_pts, closingAxis)
 % computeOrientedDiameter — measures the width of a convex hull
