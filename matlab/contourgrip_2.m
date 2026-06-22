@@ -640,13 +640,10 @@ function [slicesOK_per_delta, regionCount] = uncertaintyAnalysis( ...
         if inReg && (n-rStart+1)*delta>=cfg.fingerWidth3D, nReg=nReg+1; end
         regionCount(ui) = nReg;
 
-        fprintf('delta_u=%.1fmm → [%.3f %.3f]m → %d region(s)\n', ...
-            du*1000, mnU, mxU, nReg);
+        fprintf('delta_u=%.1fmm (deform±%.1fmm) → [%.3f %.3f]m → %d region(s)\n', ...
+            du*1000, deformUncertainty*1000, mnU, mxU, nReg);
     end
 end
-
-fprintf('delta_u=%.1fmm (deform±%.1fmm) → [%.3f %.3f]m → %d region(s)\n', ...
-    du*1000, deformUncertainty*1000, mnU, mxU, nReg);
 
 % -------------------------------------------------------------------------
 function [regionCounts_occ, regionOK_occ] = occlusionTest( ...
@@ -777,9 +774,6 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
     useOriented = (nargin == 9) && ~isempty(closingAxis);
 
     % --- Test A: Resolution Convergence ---
-    % Re-runs slicing at 10, 20, 30, and 50 slices to check whether the
-    % feasible Z range stabilizes as slice count increases. If results
-    % converge, 50 slices is sufficient resolution for this fruit.
     fprintf('\n--- Test A: Resolution Convergence ---\n');
     nSlice_tests = [10, 20, 30, 50];
     feasStart    = zeros(size(nSlice_tests));
@@ -805,9 +799,6 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
     end
 
     % --- Test B: Diameter Verification ---
-    % Recomputes diameter independently for each slice using the same method
-    % (oriented or global) as the main analysis and compares against
-    % sliceDia_rigid. Discrepancies above 0.1mm flag an implementation error.
     fprintf('\n--- Test B: Diameter Verification ---\n');
     nErr = 0; nChk = 0; tol_chk = 1e-4;
 
@@ -823,12 +814,8 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
             hull_pts = lp(k, 1:2);
 
             if useOriented
-                % recompute using same closing axis as main analysis
-                % projects hull points onto closing axis, takes max-min
-                projections = hull_pts * closingAxis(:);
-                D_gt = max(projections) - min(projections);
+                D_gt = computeOrientedDiameter(hull_pts, closingAxis);
             else
-                % recompute using global max pairwise distance
                 D_gt = 0;
                 for pp1 = 1:size(hull_pts,1)
                     for pp2 = pp1+1:size(hull_pts,1)
@@ -838,7 +825,6 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
                 end
             end
         catch
-            % fallback if convhull fails
             D_gt = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
         end
 
@@ -863,8 +849,6 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
     title('Test A: Resolution Convergence'); grid on; xticks(nSlice_tests);
 
     subplot(1,2,2);
-    % recompute diffs using same method as Test B above
-    % so the bar chart is consistent with what was verified numerically
     diffs = nan(n,1);
     for i = 1:n
         if isnan(sliceDia_rigid(i)), continue; end
@@ -878,19 +862,14 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
             hull_pts = lp(k, 1:2);
 
             if useOriented
-                % use oriented projection — same as Test B numerical check
-                projections  = hull_pts * closingAxis(:);
-                D_recomputed = max(projections) - min(projections);
+                D_recomputed = computeOrientedDiameter(hull_pts, closingAxis);
             else
-                % use global bounding box
                 D_recomputed = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
             end
         catch
             D_recomputed = max(max(lp(:,1))-min(lp(:,1)), max(lp(:,2))-min(lp(:,2)));
         end
 
-        % diff between recomputed and stored rigid diameter
-        % should be near zero — any gap indicates an implementation inconsistency
         diffs(i) = abs(D_recomputed - sliceDia_rigid(i));
     end
 
@@ -901,7 +880,7 @@ function runValidation(vertices, faces, zValues, allLoops, sliceDia, sliceDia_ri
 
     sgtitle('Section 7: Geometric Validation');
 
-end   % closes runValidation
+end
 % -------------------------------------------------------------------------
 function exportGraspCSV(S9, cfg)
 % Write grasp pose to CSV for Gazebo.
