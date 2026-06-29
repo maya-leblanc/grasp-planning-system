@@ -1,3 +1,3 @@
 [submodule "simulation"]
 	path = simulation
-	url = https://github.com/maya-leblanc/sim_sensor
+	url = https://github.com/maya-leblanc/grasp-planning-sim
