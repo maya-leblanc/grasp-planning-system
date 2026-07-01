@@ -1,3 +1,7 @@
+[submodule "simulation"]
+    path = simulation
+    url = https://github.com/maya-leblanc/grasp-planning-sim
+
 [submodule "src/ros2_robotiq_gripper"]
-	path = src/ros2_robotiq_gripper
-	url = https://github.com/maya-leblanc/ros2_robotiq_gripper
+    path = src/ros2_robotiq_gripper
+    url = https://github.com/maya-leblanc/ros2_robotiq_gripper

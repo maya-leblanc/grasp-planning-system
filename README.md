@@ -6,7 +6,7 @@ This project requires the following external packages:
 
 - [ros2_robotiq_gripper](https://github.com/PickNikRobotics/ros2_robotiq_gripper) 
   by PickNik Robotics — used for the Robotiq 2F-85 gripper URDF and simulation.
-  
+
   Install with:
 ```bash
   git clone https://github.com/PickNikRobotics/ros2_robotiq_gripper
