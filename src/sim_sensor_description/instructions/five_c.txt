@@ -1,7 +1,0 @@
-# example one. add to top of CMakeLists.txt file
-
-from launch.substitutions import Command
-import xacro
-
-xacro_path = os.path.join(pkg, 'urdf', 'my_robot_name.urdf.xacro')
-robot_description = xacro.process_file(xacro_path).toxml()

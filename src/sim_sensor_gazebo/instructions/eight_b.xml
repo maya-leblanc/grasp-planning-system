@@ -1,7 +1,0 @@
-# example one
-
-Node(
-    package='rviz2',
-    executable='rviz2',
-    arguments=['-d', os.path.join(pkg, 'rviz', 'view.rviz')]
-),
